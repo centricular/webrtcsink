@@ -1728,6 +1728,8 @@ impl WebRTCSink {
             state.navigation_handler = Some(NavigationEventHandler::new(&element, &webrtcbin));
         }
 
+        element.emit_by_name::<()>("consumer-added", &[&peer_id, &webrtcbin]);
+
         pipeline.set_state(gst::State::Playing).map_err(|err| {
             WebRTCSinkError::ConsumerPipelineError {
                 peer_id: peer_id.to_string(),
@@ -1738,7 +1740,6 @@ impl WebRTCSink {
         state.consumers.insert(peer_id.to_string(), consumer);
 
         drop(state);
-        element.emit_by_name::<()>("consumer-added", &[&peer_id, &webrtcbin]);
 
         Ok(())
     }
