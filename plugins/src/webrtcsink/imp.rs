@@ -31,6 +31,7 @@ static CAT: Lazy<gst::DebugCategory> = Lazy::new(|| {
 
 const CUDA_MEMORY_FEATURE: &str = "memory:CUDAMemory";
 const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
+const NVMM_MEMORY_FEATURE: &str = "memory:NVMM";
 
 const RTP_TWCC_URI: &str =
     "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
@@ -371,6 +372,16 @@ fn make_converter_for_video_caps(caps: &gst::Caps) -> Result<gst::Element, Error
                 gst::Element::link_many(&[&glupload, &glconvert, &glscale])?;
 
                 (glupload, glscale)
+            } else if feature.contains(NVMM_MEMORY_FEATURE) {
+                let queue = make_element("queue", None)?;
+                let nvconvert = make_element("nvvideoconvert", None)?;
+                nvconvert.set_property_from_str("compute-hw", "VIC");
+                nvconvert.set_property_from_str("nvbuf-memory-type", "nvbuf-mem-surface-array");
+
+                ret.add_many(&[&queue, &nvconvert])?;
+                gst::Element::link_many(&[&queue, &nvconvert])?;
+
+                (queue, nvconvert)
             } else {
                 let convert = make_element("videoconvert", None)?;
                 let scale = make_element("videoscale", None)?;
@@ -453,6 +464,24 @@ fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
                 enc.set_property("bitrate", start_bitrate / 1000);
                 enc.set_property("keyframe-period", 2560u32);
                 enc.set_property_from_str("rate-control", "cbr");
+            }
+            "nvv4l2h264enc" => {
+                enc.set_property("bitrate", 4096000u32 / 1000);
+                enc.set_property("insert-sps-pps", true);
+                enc.set_property_from_str("preset-level", "UltraFastPreset");
+                enc.set_property("maxperf-enable", true);
+                enc.set_property("insert-vui", true);
+                enc.set_property("idrinterval", 256u32);
+                enc.set_property("insert-sps-pps", true);
+                enc.set_property("insert-aud", true);
+                enc.set_property_from_str("control-rate", "variable_bitrate");
+            }
+            "nvv4l2vp8enc" => {
+                enc.set_property("bitrate", 4096000u32 / 1000);
+                enc.set_property_from_str("preset-level", "UltraFastPreset");
+                enc.set_property("maxperf-enable", true);
+                enc.set_property("idrinterval", 256u32);
+                enc.set_property_from_str("control-rate", "variable_bitrate");
             }
             _ => (),
         }
@@ -620,7 +649,7 @@ impl VideoEncoder {
     fn bitrate(&self) -> i32 {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.property::<i32>("target-bitrate"),
-            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" => {
+            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" | "nvv4l2h264enc" | "nvv4l2vp8enc" => {
                 (self.element.property::<u32>("bitrate") * 1000) as i32
             }
             factory => unimplemented!("Factory {} is currently not supported", factory),
@@ -644,7 +673,7 @@ impl VideoEncoder {
     fn set_bitrate(&mut self, element: &super::WebRTCSink, bitrate: i32) {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.set_property("target-bitrate", bitrate),
-            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" => self
+            "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" | "nvv4l2h264enc" | "nvv4l2vp8enc" => self
                 .element
                 .set_property("bitrate", (bitrate / 1000) as u32),
             factory => unimplemented!("Factory {} is currently not supported", factory),
@@ -2921,6 +2950,10 @@ impl ElementImpl for WebRTCSink {
                 .structure_with_features(
                     gst::Structure::builder("video/x-raw").build(),
                     gst::CapsFeatures::new(&[GL_MEMORY_FEATURE]),
+                )
+                .structure_with_features(
+                    gst::Structure::builder("video/x-raw").build(),
+                    gst::CapsFeatures::new(&[NVMM_MEMORY_FEATURE]),
                 )
                 .build();
             let video_pad_template = gst::PadTemplate::new(
