@@ -301,10 +301,16 @@ pub struct WebRTCSink {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            video_caps: ["video/x-vp8", "video/x-h264", "video/x-vp9", "video/x-h265"]
-                .iter()
-                .map(|s| gst::Structure::new_empty(s))
-                .collect::<gst::Caps>(),
+            video_caps: [
+                "video/x-vp8",
+                "video/x-h264",
+                "video/x-vp9",
+                "video/x-av1",
+                "video/x-h265",
+            ]
+            .iter()
+            .map(|s| gst::Structure::new_empty(s))
+            .collect::<gst::Caps>(),
             audio_caps: ["audio/x-opus"]
                 .iter()
                 .map(|s| gst::Structure::new_empty(s))
@@ -434,6 +440,21 @@ fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
                 enc.set_property_from_str("error-resilient", "default");
                 enc.set_property("lag-in-frames", 0i32);
             }
+            "av1enc" => {
+                enc.set_property("target-bitrate", start_bitrate / 1000);
+                enc.set_property("cpu-used", 7);
+                enc.set_property("max-quantizer", 56 as u32);
+                enc.set_property("min-quantizer", 10 as u32);
+                enc.set_property_from_str("end-usage", "cbr");
+                enc.set_property_from_str("keyframe-mode", "disabled");
+                enc.set_property_from_str("enc-pass", "one-pass");
+                // Disable lagged encoding
+                enc.set_property("lag-in-frames", 0 as u32);
+            }
+            "rav1enc" => {
+                enc.set_property("bitrate", start_bitrate as i32);
+                enc.set_property("low-latency", true);
+            }
             "x264enc" => {
                 enc.set_property("bitrate", start_bitrate / 1000);
                 enc.set_property_from_str("tune", "zerolatency");
@@ -505,6 +526,8 @@ fn setup_encoding(
         Some(make_element("h264parse", None)?)
     } else if codec_name == "video/x-h265" {
         Some(make_element("h265parse", None)?)
+    } else if codec_name == "video/x-av1" {
+        Some(make_element("av1parse", None)?)
     } else {
         None
     } {
@@ -520,14 +543,25 @@ fn setup_encoding(
         let mut structure_builder = gst::Structure::builder("video/x-raw")
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1));
 
-        if codec.encoder.name() == "nvh264enc" {
-            // Quirk: nvh264enc can perform conversion from RGB formats, but
-            // doesn't advertise / negotiate colorimetry correctly, leading
-            // to incorrect color display in Chrome (but interestingly not in
-            // Firefox). In any case, restrict to exclude RGB formats altogether,
-            // and let videoconvert do the conversion properly if needed.
-            structure_builder =
-                structure_builder.field("format", &gst::List::new(&[&"NV12", &"YV12", &"I420"]));
+        match codec.encoder.name().as_str() {
+            "nvh264enc" => {
+                // Quirk: nvh264enc can perform conversion from RGB formats, but
+                // doesn't advertise / negotiate colorimetry correctly, leading
+                // to incorrect color display in Chrome (but interestingly not in
+                // Firefox). In any case, restrict to exclude RGB formats altogether,
+                // and let videoconvert do the conversion properly if needed.
+                structure_builder = structure_builder
+                    .field("format", &gst::List::new(&[&"NV12", &"YV12", &"I420"]));
+            }
+            "rav1enc" => {
+                // Unfortunately other formats (Y444) don't yet work.
+                structure_builder = structure_builder.field("format", "I420");
+            }
+            "av1enc" => {
+                // Unfortunately other formats (Y444) don't yet work.
+                structure_builder = structure_builder.field("format", "I420");
+            }
+            _ => (),
         }
 
         gst::Caps::builder_full_with_any_features()
@@ -620,6 +654,8 @@ impl VideoEncoder {
     fn bitrate(&self) -> i32 {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.property::<i32>("target-bitrate"),
+            "av1enc" => (self.element.property::<u32>("target-bitrate") * 1000) as i32,
+            "rav1enc" => self.element.property::<i32>("bitrate"),
             "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" => {
                 (self.element.property::<u32>("bitrate") * 1000) as i32
             }
@@ -644,6 +680,10 @@ impl VideoEncoder {
     fn set_bitrate(&mut self, element: &super::WebRTCSink, bitrate: i32) {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.set_property("target-bitrate", bitrate),
+            "av1enc" => self
+                .element
+                .set_property("target-bitrate", (bitrate / 1000) as u32),
+            "rav1enc" => self.element.set_property("bitrate", bitrate),
             "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" => self
                 .element
                 .set_property("bitrate", (bitrate / 1000) as u32),
