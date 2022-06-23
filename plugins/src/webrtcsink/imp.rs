@@ -244,10 +244,16 @@ pub struct WebRTCSink {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            video_caps: ["video/x-vp8", "video/x-h264", "video/x-vp9", "video/x-h265"]
-                .iter()
-                .map(|s| gst::Structure::new_empty(s))
-                .collect::<gst::Caps>(),
+            video_caps: [
+                "video/x-vp8",
+                "video/x-h264",
+                "video/x-vp9",
+                "video/x-av1",
+                "video/x-h265",
+            ]
+            .iter()
+            .map(|s| gst::Structure::new_empty(s))
+            .collect::<gst::Caps>(),
             audio_caps: ["audio/x-opus"]
                 .iter()
                 .map(|s| gst::Structure::new_empty(s))
@@ -379,6 +385,24 @@ fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
                 enc.set_property_from_str("error-resilient", "default");
                 enc.set_property("lag-in-frames", 0i32);
             }
+            "av1enc" => {
+                enc.set_property("target-bitrate", start_bitrate / 1000);
+                enc.set_property("cpu-used", 10);
+                enc.set_property("max-quantizer", 56 as u32);
+                enc.set_property("min-quantizer", 10 as u32);
+                enc.set_property_from_str("end-usage", "cbr");
+                enc.set_property_from_str("enc-pass", "one-pass");
+                enc.set_property_from_str("usage-profile", "realtime");
+                enc.set_property("tile-columns", 2 as u32);
+                enc.set_property("tile-rows", 1 as u32);
+                enc.set_property("threads", 12 as u32);
+                // Disable lagged encoding
+                enc.set_property("lag-in-frames", 0 as u32);
+            }
+            "rav1enc" => {
+                enc.set_property("bitrate", start_bitrate as i32);
+                enc.set_property("low-latency", true);
+            }
             "x264enc" => {
                 enc.set_property("bitrate", start_bitrate / 1000);
                 enc.set_property_from_str("tune", "zerolatency");
@@ -450,6 +474,8 @@ fn setup_encoding(
         Some(make_element("h264parse", None)?)
     } else if codec_name == "video/x-h265" {
         Some(make_element("h265parse", None)?)
+    } else if codec_name == "video/x-av1" {
+        Some(make_element("av1parse", None)?)
     } else {
         None
     } {
@@ -550,6 +576,8 @@ impl VideoEncoder {
     pub fn bitrate(&self) -> i32 {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.property::<i32>("target-bitrate"),
+            "av1enc" => (self.element.property::<u32>("target-bitrate") * 1000) as i32,
+            "rav1enc" => self.element.property::<i32>("bitrate"),
             "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" => {
                 (self.element.property::<u32>("bitrate") * 1000) as i32
             }
@@ -574,6 +602,10 @@ impl VideoEncoder {
     pub fn set_bitrate(&mut self, element: &super::WebRTCSink, bitrate: i32) {
         match self.factory_name.as_str() {
             "vp8enc" | "vp9enc" => self.element.set_property("target-bitrate", bitrate),
+            "av1enc" => self
+                .element
+                .set_property("target-bitrate", (bitrate / 1000) as u32),
+            "rav1enc" => self.element.set_property("bitrate", bitrate),
             "x264enc" | "nvh264enc" | "vaapih264enc" | "vaapivp8enc" => self
                 .element
                 .set_property("bitrate", (bitrate / 1000) as u32),
@@ -943,6 +975,47 @@ impl Consumer {
                 }
                 if profile == 3 {
                     formats.push(&"I422_10LE")
+                }
+
+                let mut raw_caps = raw_filter.property::<gst::Caps>("caps");
+                raw_caps
+                    .make_mut()
+                    .set_simple(&[("format", &gst::List::new(&formats))]);
+                raw_filter.set_property("caps", raw_caps);
+            }
+            // FIXME: Remove av1enc when its fixed
+            // https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/1404
+            // av1enc doesn't set upstream caps based on downstream profile
+            // rav1enc doesn't have a profile src cap at all
+            "av1enc" | "rav1enc" => {
+                let profile = {
+                    if let Some(id) = filtered_s.get_optional::<String>("profile").unwrap() {
+                        id.parse::<u32>().unwrap()
+                    } else {
+                        // Missing profile implies profile 0
+                        0
+                    }
+                };
+
+                // https://aomedia.org/av1/specification/annex-a/#profiles
+                // "Main"
+                let mut formats = vec![&"GRAY8", &"I420"];
+                // "High"
+                if profile >= 1 {
+                    formats.push(&"Y444")
+                }
+                // "Professional"
+                if profile == 2 {
+                    formats.extend_from_slice(&[
+                        &"Y42B",
+                        &"YV12",
+                        &"I420_10LE",
+                        &"I422_10LE",
+                        &"Y444_10LE",
+                        &"I420_12LE",
+                        &"I422_12LE",
+                        &"Y444_12LE",
+                    ])
                 }
 
                 let mut raw_caps = raw_filter.property::<gst::Caps>("caps");
