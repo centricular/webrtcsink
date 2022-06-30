@@ -735,7 +735,6 @@ impl Default for State {
 
 impl State {
     // 4. sending engine implementing a "leaky bucket"
-    // FIXME: Implement "stuffing"
     fn create_buffer_list(&mut self, bwe: &super::BandwidthEstimator) -> gst::BufferList {
         let now = time::Instant::now();
         let elapsed = Duration::from_std(now - self.last_push).unwrap();
