@@ -97,10 +97,9 @@ struct InputStream {
     clocksync: Option<gst::Element>,
     // Payload according being video or audio
     payload: Option<i32>,
-    // Appsrc for the stream
-    appsrc: Option<gst_app::AppSrc>,
-    // Tee for the stream
+    /// Saves Tee where all consumers link to
     tee: Option<gst::Element>,
+    /// Saves ssrc for all the consumers
     ssrc: u32,
 }
 
@@ -108,15 +107,15 @@ struct InputStream {
 #[derive(Clone)]
 struct WebRTCPad {
     pad: gst::Pad,
-    /// The (fixed) caps of the corresponding input stream
-    in_caps: gst::Caps,
-    /// The m= line index in the SDP
+    // The (fixed) caps of the corresponding input stream
+    //in_caps: gst::Caps,
+    // The m= line index in the SDP
     media_idx: u32,
-    ssrc: u32,
-    /// The name of the corresponding InputStream's sink_pad
+    //ssrc: u32,
+    // The name of the corresponding InputStream's sink_pad
     stream_name: String,
-    /// The payload selected in the answer, None at first
-    payload: Option<i32>,
+    // The payload selected in the answer, None at first
+    //payload: Option<i32>,
 }
 
 /// Wrapper around GStreamer encoder element, keeps track of factory
@@ -197,7 +196,6 @@ enum ControllerType {
 }
 
 struct Consumer {
-    //pipeline: gst::Pipeline,
     webrtcbin: gst::Element,
     webrtc_pads: HashMap<u32, WebRTCPad>,
     peer_id: String,
@@ -1120,7 +1118,7 @@ impl State {
     ) {
         self.pipeline.debug_to_dot_file_with_ts(
             gst::DebugGraphDetails::all(),
-            format!("removing-peer-{}-", consumer.peer_id,),
+            format!("removing-consumer-with-peerId-{}-", consumer.peer_id,),
         );
 
         for ssrc in consumer.webrtc_pads.keys() {
@@ -1271,11 +1269,8 @@ impl Consumer {
             stream.ssrc,
             WebRTCPad {
                 pad,
-                in_caps: stream.in_caps.as_ref().unwrap().clone(),
                 media_idx: media_idx as u32,
-                ssrc: stream.ssrc,
                 stream_name: stream.sink_pad.name().to_string(),
-                payload: Some(stream.payload.as_ref().unwrap().clone()),
             },
         );
     }
@@ -1297,7 +1292,6 @@ impl Consumer {
             self.peer_id
         );
         let tee = stream.tee.as_ref().unwrap();
-        //let appsrc = stream.appsrc.as_ref().unwrap();
         //let payload = webrtc_pad.payload.unwrap();
         
 
@@ -1308,6 +1302,7 @@ impl Consumer {
         // conflict with what the peer actually requested (see webrtcbin's
         // caps query implementation), and instead install a capsfilter downstream
         // of the payloader with caps constructed from the relevant SDP media.
+        
         // let transceiver = webrtc_pad
         //     .pad
         //     .property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
@@ -1493,6 +1488,60 @@ impl InputStream {
         pipeline.set_start_time(gst::ClockTime::NONE);
         pipeline.set_base_time(element.base_time().unwrap());
 
+        let mut bus_stream = pipeline.bus().unwrap().stream();
+        let element_clone = element.downgrade();
+        let pipeline_clone = pipeline.downgrade();
+        //let peer_id_clone = peer_id.to_owned();
+
+        task::spawn(async move {
+            while let Some(msg) = bus_stream.next().await {
+                if let Some(_element) = element_clone.upgrade() {
+                    //let this = Self::from_instance(&element);
+                    match msg.view() {
+                        gst::MessageView::Error(err) => {
+                            gst::error!(
+                                CAT,
+                                "Producer error: {}, details: {:?}",
+                                err.error(),
+                                err.debug()
+                            );
+                            //let _ = this.remove_consumer(&element, &peer_id_clone, true);
+                        }
+                        gst::MessageView::StateChanged(state_changed) => {
+                            if let Some(pipeline) = pipeline_clone.upgrade() {
+                                if Some(pipeline.clone().upcast()) == state_changed.src() {
+                                    gst::info!(CAT,
+                                        "Pudim Dot of change of state in producer pipeline");
+                                    pipeline.debug_to_dot_file_with_ts(
+                                        gst::DebugGraphDetails::all(),
+                                        format!(
+                                            "webrtcsink-producer-peer-{:?}-to-{:?}",
+                                            state_changed.old(),
+                                            state_changed.current()
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        gst::MessageView::Latency(..) => {
+                            if let Some(pipeline) = pipeline_clone.upgrade() {
+                                gst::info!(CAT, obj: &pipeline, "Recalculating latency");
+                                let _ = pipeline.recalculate_latency();
+                            }
+                        }
+                        gst::MessageView::Eos(..) => {
+                            gst::error!(
+                                CAT,
+                                "Unexpected end of stream for producer",
+                            );
+                            //let _ = this.remove_consumer(&element, &peer_id_clone, true);
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        });
+
         let result = match self.producer.as_ref().unwrap().add_consumer(&appsrc) {
             Ok(link) => {
                 links.insert(self.sink_pad.name().to_string(), link);
@@ -1514,7 +1563,6 @@ impl InputStream {
             }
         })?;
 
-        self.appsrc = Some(appsrc);
         self.tee = Some(tee);
 
         result
@@ -1823,8 +1871,6 @@ impl WebRTCSink {
 
         gst::info!(CAT, obj: element, "Adding consumer {}", peer_id);
 
-        //let pipeline = gst::Pipeline::new(Some(&format!("consumer-pipeline-{}", peer_id)));
-
         let webrtcbin = make_element("webrtcbin", None).map_err(|err| {
             WebRTCSinkError::ConsumerPipelineError {
                 peer_id: peer_id.to_string(),
@@ -2014,60 +2060,60 @@ impl WebRTCSink {
         // pipeline.set_start_time(gst::ClockTime::NONE);
         // pipeline.set_base_time(element.base_time().unwrap());
 
-        let mut bus_stream = state.pipeline.bus().unwrap().stream();
-        let element_clone = element.downgrade();
-        let pipeline_clone = state.pipeline.downgrade();
-        let peer_id_clone = peer_id.to_owned();
+        // let mut bus_stream = state.pipeline.bus().unwrap().stream();
+        // let element_clone = element.downgrade();
+        // let pipeline_clone = state.pipeline.downgrade();
+        // let peer_id_clone = peer_id.to_owned();
 
-        task::spawn(async move {
-            while let Some(msg) = bus_stream.next().await {
-                if let Some(element) = element_clone.upgrade() {
-                    let this = Self::from_instance(&element);
-                    match msg.view() {
-                        gst::MessageView::Error(err) => {
-                            gst::error!(
-                                CAT,
-                                "Consumer {} error: {}, details: {:?}",
-                                peer_id_clone,
-                                err.error(),
-                                err.debug()
-                            );
-                            let _ = this.remove_consumer(&element, &peer_id_clone, true);
-                        }
-                        gst::MessageView::StateChanged(state_changed) => {
-                            if let Some(pipeline) = pipeline_clone.upgrade() {
-                                if Some(pipeline.clone().upcast()) == state_changed.src() {
-                                    pipeline.debug_to_dot_file_with_ts(
-                                        gst::DebugGraphDetails::all(),
-                                        format!(
-                                            "webrtcsink-peer-{}-{:?}-to-{:?}",
-                                            peer_id_clone,
-                                            state_changed.old(),
-                                            state_changed.current()
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                        gst::MessageView::Latency(..) => {
-                            if let Some(pipeline) = pipeline_clone.upgrade() {
-                                gst::info!(CAT, obj: &pipeline, "Recalculating latency");
-                                let _ = pipeline.recalculate_latency();
-                            }
-                        }
-                        gst::MessageView::Eos(..) => {
-                            gst::error!(
-                                CAT,
-                                "Unexpected end of stream for consumer {}",
-                                peer_id_clone
-                            );
-                            let _ = this.remove_consumer(&element, &peer_id_clone, true);
-                        }
-                        _ => (),
-                    }
-                }
-            }
-        });
+        // task::spawn(async move {
+        //     while let Some(msg) = bus_stream.next().await {
+        //         if let Some(element) = element_clone.upgrade() {
+        //             let this = Self::from_instance(&element);
+        //             match msg.view() {
+        //                 gst::MessageView::Error(err) => {
+        //                     gst::error!(
+        //                         CAT,
+        //                         "Consumer {} error: {}, details: {:?}",
+        //                         peer_id_clone,
+        //                         err.error(),
+        //                         err.debug()
+        //                     );
+        //                     let _ = this.remove_consumer(&element, &peer_id_clone, true);
+        //                 }
+        //                 gst::MessageView::StateChanged(state_changed) => {
+        //                     if let Some(pipeline) = pipeline_clone.upgrade() {
+        //                         if Some(pipeline.clone().upcast()) == state_changed.src() {
+        //                             pipeline.debug_to_dot_file_with_ts(
+        //                                 gst::DebugGraphDetails::all(),
+        //                                 format!(
+        //                                     "webrtcsink-peer-{}-{:?}-to-{:?}",
+        //                                     peer_id_clone,
+        //                                     state_changed.old(),
+        //                                     state_changed.current()
+        //                                 ),
+        //                             );
+        //                         }
+        //                     }
+        //                 }
+        //                 gst::MessageView::Latency(..) => {
+        //                     if let Some(pipeline) = pipeline_clone.upgrade() {
+        //                         gst::info!(CAT, obj: &pipeline, "Recalculating latency");
+        //                         let _ = pipeline.recalculate_latency();
+        //                     }
+        //                 }
+        //                 gst::MessageView::Eos(..) => {
+        //                     gst::error!(
+        //                         CAT,
+        //                         "Unexpected end of stream for consumer {}",
+        //                         peer_id_clone
+        //                     );
+        //                     let _ = this.remove_consumer(&element, &peer_id_clone, true);
+        //                 }
+        //                 _ => (),
+        //             }
+        //         }
+        //     }
+        // });
 
         webrtcbin.set_state(gst::State::Ready).map_err(|err| {
             WebRTCSinkError::ConsumerPipelineError {
@@ -2216,7 +2262,7 @@ impl WebRTCSink {
 
             state.pipeline.debug_to_dot_file_with_ts(
                 gst::DebugGraphDetails::all(),
-                format!("webrtcsink-peer-{}-remote-description-set", peer_id,),
+                format!("webrtcsink-consumer-peerId-{}-remote-description-set", peer_id,),
             );
 
             let element_clone = element.downgrade();
@@ -3128,7 +3174,6 @@ impl ElementImpl for WebRTCSink {
                 out_caps: None,
                 clocksync: None,
                 payload: Some(payload.clone()),
-                appsrc: None,
                 tee: None,
                 ssrc: ret,
             },
