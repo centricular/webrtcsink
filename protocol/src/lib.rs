@@ -58,11 +58,23 @@ pub enum UnregisteredMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(tag = "peerType")]
 #[serde(rename_all = "camelCase")]
-pub struct Peer {
-    pub id: String,
-    #[serde(default)]
-    pub meta: Option<serde_json::Value>,
+pub enum Peer {
+    /// UnRegistered as a producer
+    #[serde(rename_all = "camelCase")]
+    Producer {
+        id: String,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
+    },
+    /// UnRegistered as a consumer
+    #[serde(rename_all = "camelCase")]
+    Consumer {
+        id: String,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -93,7 +105,7 @@ pub enum OutgoingMessage {
     StartSession { peer_id: String },
     /// Signals that the session the peer was in was ended
     #[serde(rename_all = "camelCase")]
-    EndSession { peer_id: String },
+    EndSession(EndSessionMessage),
     /// Messages directly forwarded from one peer to another
     Peer(PeerMessage),
     /// Provides the current list of consumer peers
@@ -185,21 +197,30 @@ pub enum PeerMessageInner {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-/// Messages directly forwarded from one peer to another
-pub struct PeerMessage {
-    /// The identifier of the peer, which must be in a session with the sender
+pub struct PeerMessageInfo {
     pub peer_id: String,
-    /// The contents of the message
     #[serde(flatten)]
     pub peer_message: PeerMessageInner,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(tag = "senderType")]
+#[serde(rename_all = "camelCase")]
+/// Messages directly forwarded from one peer to another
+pub enum PeerMessage {
+    Producer(PeerMessageInfo),
+    Consumer(PeerMessageInfo),
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(tag = "senderType")]
 #[serde(rename_all = "camelCase")]
 /// End a session
-pub struct EndSessionMessage {
-    /// The identifier of the peer to end the session with
-    pub peer_id: String,
+pub enum EndSessionMessage {
+    #[serde(rename_all = "camelCase")]
+    Consumer{peer_id: String},
+    #[serde(rename_all = "camelCase")]
+    Producer{peer_id: String},
 }
 
 #[derive(Serialize, Deserialize, Debug)]
