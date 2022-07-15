@@ -109,6 +109,7 @@ struct WebRTCPad {
     pad: gst::Pad,
     // The (fixed) caps of the corresponding input stream
     //in_caps: gst::Caps,
+    tee_pad: gst::Pad,
     // The m= line index in the SDP
     media_idx: u32,
     //ssrc: u32,
@@ -204,9 +205,7 @@ struct Consumer {
     congestion_controller: Option<CongestionController>,
     sdp: Option<gst_sdp::SDPMessage>,
     stats: gst::Structure,
-
     max_bitrate: u32,
-
     links: HashMap<u32, gst_utils::ConsumptionLink>,
     stats_sigid: Option<glib::SignalHandlerId>,
 }
@@ -334,7 +333,9 @@ impl Default for Settings {
 impl Default for State {
     fn default() -> Self {
         let signaller = Signaller::default();
-        let pipeline = gst::Pipeline::new(Some(&format!("producer-pipeline-display-name")));
+        
+        let pipeline = gst::Pipeline::new(None);
+
         Self {
             signaller: Box::new(signaller),
             signaller_state: SignallerState::Stopped,
@@ -1121,12 +1122,12 @@ impl State {
             format!("removing-consumer-with-peerId-{}-", consumer.peer_id,),
         );
 
-        for ssrc in consumer.webrtc_pads.keys() {
-            consumer.links.remove(ssrc);
-        }
+        // for ssrc in consumer.webrtc_pads.keys() {
+        //     consumer.links.remove(ssrc);
+        // }
 
-        self.pipeline.call_async(|pipeline| {
-            let _ = pipeline.set_state(gst::State::Null);
+        consumer.webrtcbin.call_async(|webrtcbin| {
+            let _ = webrtcbin.set_state(gst::State::Null);
         });
 
         if signal {
@@ -1141,6 +1142,7 @@ impl State {
         signal: bool,
     ) -> Option<Consumer> {
         if let Some(mut consumer) = self.consumers.remove(peer_id) {
+            gst::info!(CAT, "VERDE finalize consumer in remove consumer state");
             self.finalize_consumer(element, &mut consumer, signal);
             Some(consumer)
         } else {
@@ -1265,10 +1267,15 @@ impl Consumer {
             transceiver.set_property("do-nack", settings.do_retransmission);
         }
 
+
+        let pad_template = stream.tee.as_ref().unwrap().pad_template("src_%u").unwrap();
+        let tee_pad = stream.tee.as_ref().unwrap().request_pad(&pad_template, None, None).unwrap();
+
         self.webrtc_pads.insert(
             stream.ssrc,
             WebRTCPad {
                 pad,
+                tee_pad: tee_pad,
                 media_idx: media_idx as u32,
                 stream_name: stream.sink_pad.name().to_string(),
             },
@@ -1280,9 +1287,7 @@ impl Consumer {
     fn connect_input_stream(
         &mut self,
         element: &super::WebRTCSink,
-        stream: &InputStream,
         webrtc_pad: &WebRTCPad,
-        pipeline: &gst::Pipeline,
     ) -> Result<(), Error> {
         gst::info!(
             CAT,
@@ -1291,7 +1296,6 @@ impl Consumer {
             webrtc_pad.stream_name,
             self.peer_id
         );
-        let tee = stream.tee.as_ref().unwrap();
         //let payload = webrtc_pad.payload.unwrap();
         
 
@@ -1335,19 +1339,15 @@ impl Consumer {
         //     self.encoders.push(enc);
         // }
 
-        pipeline
-            .sync_children_states()
-            .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
+        // pipeline
+        //     .sync_children_states()
+        //     .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
 
-        let pad_template = tee.pad_template("src_%u").unwrap();
 
-        self.webrtcbin.sync_state_with_parent().unwrap();
-
-        tee.request_pad(&pad_template, None, None).unwrap()
-        .link(&webrtc_pad.pad)
-        .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
-
-       
+        webrtc_pad.tee_pad.link(&webrtc_pad.pad)
+               .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
+        
+            
         Ok(())
     }
 }
@@ -1691,6 +1691,7 @@ impl WebRTCSink {
         let consumer_ids: Vec<_> = state.consumers.keys().map(|k| k.to_owned()).collect();
 
         for id in consumer_ids {
+            gst::info!(CAT, "VERDE remove consumer in unprepare webrtcsink");
             state.remove_consumer(element, &id, true);
         }
 
@@ -1757,6 +1758,7 @@ impl WebRTCSink {
                     peer_id,
                     err
                 );
+                gst::info!(CAT, "VERDE remove consumer in offer created");
 
                 state.remove_consumer(element, peer_id, true);
             }
@@ -1786,6 +1788,8 @@ impl WebRTCSink {
                                 "Promise returned without a reply for {}",
                                 peer_id
                             );
+                            gst::info!(CAT, "VERDE remove consumer in negotiate");
+
                             let _ = this.remove_consumer(&element, &peer_id, true);
                             return;
                         }
@@ -1797,6 +1801,7 @@ impl WebRTCSink {
                                 peer_id,
                                 err
                             );
+                            gst::info!(CAT, "VERDE remove consumer in negotiate");
                             let _ = this.remove_consumer(&element, &peer_id, true);
                             return;
                         }
@@ -1814,6 +1819,7 @@ impl WebRTCSink {
                             peer_id,
                             reply
                         );
+                        gst::info!(CAT, "VERDE remove consumer in negotiate");
                         let _ = this.remove_consumer(&element, &peer_id, true);
                     }
                 }
@@ -1851,6 +1857,7 @@ impl WebRTCSink {
                 peer_id,
                 err
             );
+            gst::info!(CAT, "VERDE remove consumer on ice candidate");
 
             state.remove_consumer(element, &peer_id, true);
         }
@@ -1923,6 +1930,7 @@ impl WebRTCSink {
                             "Connection state for consumer {} failed",
                             peer_id_clone
                         );
+                        gst::info!(CAT, "VERDE remove consumer in add consumer");
                         let _ = this.remove_consumer(&element, &peer_id_clone, true);
                     }
                     _ => {
@@ -1954,6 +1962,7 @@ impl WebRTCSink {
                             "Ice connection state for consumer {} failed",
                             peer_id_clone
                         );
+                        gst::info!(CAT, "VERDE remove consumer in add consumer");
                         let _ = this.remove_consumer(&element, &peer_id_clone, true);
                     }
                     _ => {
@@ -2170,6 +2179,7 @@ impl WebRTCSink {
         if !state.consumers.contains_key(peer_id) {
             return Err(WebRTCSinkError::NoConsumerWithId(peer_id.to_string()));
         }
+        gst::info!(CAT, "VERDE remove consumer in remove consumer webrtcsink");
 
         if let Some(consumer) = state.remove_consumer(element, peer_id, signal) {
             drop(state);
@@ -2219,7 +2229,7 @@ impl WebRTCSink {
         let mut remove = false;
 
         if let Some(mut consumer) = state.consumers.remove(&peer_id) {
-            for webrtc_pad in consumer.webrtc_pads.clone().values() {
+            for webrtc_pad in consumer.webrtc_pads.clone().values_mut() {
                 let transceiver = webrtc_pad
                     .pad
                     .property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
@@ -2230,30 +2240,15 @@ impl WebRTCSink {
                         .insert(mid.to_string(), webrtc_pad.stream_name.clone());
                 }
 
-                if let Some(stream) = state
-                    .streams
-                    .get(&webrtc_pad.stream_name)
-                {
-                    if let Err(err) =
-                        consumer.connect_input_stream(element, stream, webrtc_pad, &state.pipeline)
-                    {
-                        gst::error!(
-                            CAT,
-                            obj: element,
-                            "Failed to connect input stream {} for consumer {}: {}",
-                            webrtc_pad.stream_name,
-                            peer_id,
-                            err
-                        );
-                        remove = true;
-                        break;
-                    }
-                } else {
+                if let Err(err) =
+                consumer.connect_input_stream(element, webrtc_pad) {
                     gst::error!(
                         CAT,
                         obj: element,
-                        "No producer to connect consumer {} to",
+                        "Failed to connect input stream {} for consumer {}: {}",
+                        webrtc_pad.stream_name,
                         peer_id,
+                        err
                     );
                     remove = true;
                     break;
@@ -2289,6 +2284,7 @@ impl WebRTCSink {
             });
 
             if remove {
+                gst::info!(CAT, "VERDE finalize consumer in on remote description set");
                 state.finalize_consumer(element, &mut consumer, true);
             } else {
                 state.consumers.insert(consumer.peer_id.clone(), consumer);
@@ -2351,6 +2347,7 @@ impl WebRTCSink {
                             media_idx,
                             media_str
                         );
+                        gst::info!(CAT, "VERDE remove consumer in handle sdp");
                         state.remove_consumer(element, peer_id, true);
 
                         return Err(WebRTCSinkError::ConsumerRefusedMedia {
