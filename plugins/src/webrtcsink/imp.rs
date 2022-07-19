@@ -97,6 +97,7 @@ struct InputStream {
     clocksync: Option<gst::Element>,
     // Payload according being video or audio
     payload: Option<i32>,
+    tee: Option<gst::Element>,
     /// Saves ssrc for all the consumers
     ssrc: u32,
 }
@@ -239,7 +240,6 @@ struct State {
     mids: HashMap<String, String>,
     pipeline: gst::Pipeline,
     links: HashMap<String, gst_utils::ConsumptionLink>,
-    tee: gst::Element,
 }
 
 fn create_navigation_event(sink: &super::WebRTCSink, msg: &str) {
@@ -332,7 +332,6 @@ impl Default for State {
         let signaller = Signaller::default();
         
         let pipeline = gst::Pipeline::new(None);
-        let tee = make_element("tee", None).unwrap();
 
         Self {
             signaller: Box::new(signaller),
@@ -348,8 +347,7 @@ impl Default for State {
             navigation_handler: None,
             mids: HashMap::new(),
             pipeline,
-            links: HashMap::new(),
-            tee,
+            links: HashMap::new()
         }
     }
 }
@@ -1093,7 +1091,7 @@ impl State {
     fn prepare_pipeline(&mut self, element: &super::WebRTCSink) {
         let mut streams = self.streams.clone();
         streams.iter_mut().for_each(|(_, stream )| {         
-                if let Err(err) = stream.callback_prepare_pipeline(&element, &self.pipeline, &self.tee, &self.codecs, &mut self.links) {
+                if let Err(err) = stream.callback_prepare_pipeline(&element, &self.pipeline, &self.codecs, &mut self.links) {
                     gst::error!(CAT, obj: element, "error: {}", err);
                     gst::element_error!(
                         element,
@@ -1116,39 +1114,49 @@ impl State {
         consumer: &mut Consumer,
         signal: bool,
     ) {
-        self.pipeline.debug_to_dot_file_with_ts(
-            gst::DebugGraphDetails::all(),
-            format!("removing-consumer-with-peerId-{}-", consumer.peer_id,),
-        );
+        let mut it = consumer.webrtc_pads.iter().peekable();
 
-        consumer.webrtc_pads.iter().for_each(| (_, webrtc_pad) | {
+        while let Some((_, webrtc_pad)) = it.next()  {
+            
+            if let Some(tee_src_pad) = webrtc_pad.pad.peer() {    
 
-            if let Some(tee_pad) = webrtc_pad.pad.peer() {
-                let tee_block = tee_pad.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
-                    gst::PadProbeReturn::Ok
-                })
-                .unwrap();
+                let tee = tee_src_pad.parent_element().unwrap();
+                gst::info!(CAT, "PUDIM tee name {}",tee_src_pad.name());
 
+                let tee_sink_pad = tee.static_pad("sink").unwrap();
 
-                tee_pad.unlink(&webrtc_pad.pad).unwrap();
+                let tee_block = tee_sink_pad
+                    .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
+                        gst::PadProbeReturn::Ok
+                    })
+                    .unwrap();
+
+                tee_src_pad.unlink(&webrtc_pad.pad).unwrap();
                 
-                self.tee.release_request_pad(&tee_pad);
+                tee.release_request_pad(&tee_src_pad);
 
-                tee_pad.remove_probe(tee_block);
+                if it.peek().is_none() {
+                    gst::info!(CAT,"PUDIM Last one");
+                    let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
+                    
+                    let pipeline_clone = self.pipeline.downgrade();
+
+                    webrtcbin.call_async(move |webrtcbin| {
+                        let pipeline = pipeline_clone.upgrade().unwrap();
+
+                        tee_sink_pad.remove_probe(tee_block);
+                        
+                        pipeline.remove(webrtcbin).unwrap(); 
+    
+                        webrtcbin.set_state(gst::State::Null).unwrap();
+                    });
+    
+                } 
+
             }
 
-        });
 
-        // for ssrc in consumer.webrtc_pads.keys() {
-        //     consumer.links.remove(ssrc);
-        // }
-       
-        consumer.webrtcbin.set_state(gst::State::Null).unwrap();
-        self.pipeline.remove(&consumer.webrtcbin).unwrap();
-      
-        // self.pipeline.call_async(|pipeline|{
-        //     let _ = pipeline.remove(&consumer.webrtcbin);
-        // });
+        }
 
         if signal {
             self.signaller.consumer_removed(element, &consumer.peer_id);
@@ -1303,7 +1311,7 @@ impl Consumer {
         &mut self,
         element: &super::WebRTCSink,
         webrtc_pad: &WebRTCPad,
-        tee: &gst::Element,
+        stream: &InputStream,
     ) -> Result<(), Error> {
         gst::info!(
             CAT,
@@ -1359,13 +1367,33 @@ impl Consumer {
         //     .sync_children_states()
         //     .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
 
-        let pad_template = tee.pad_template("src_%u").unwrap();
-        let tee_pad = tee.request_pad(&pad_template, None, None).unwrap();
-
-        tee_pad.link(&webrtc_pad.pad)
-               .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
+        let pad_template = stream.tee.as_ref().unwrap().pad_template("src_%u").unwrap();
+        let tee_pad = stream.tee.as_ref().unwrap().request_pad(&pad_template, None, None).unwrap();
         
-            
+        let tee_block = tee_pad
+            .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+        
+        tee_pad.link(&webrtc_pad.pad)
+            .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
+        
+        self.webrtcbin.call_async(move |webrtcbin| {
+            // If this fails, post an error on the bus so we exit
+            if webrtcbin.sync_state_with_parent().is_err() {
+                gst::error!(
+                    CAT,
+                    obj: webrtcbin,
+                    "Failed to set webrtcbin to Playing"
+                );
+            }
+
+            // And now unblock
+            tee_pad.remove_probe(tee_block);
+        });
+
+               
         Ok(())
     }
 }
@@ -1425,7 +1453,7 @@ impl InputStream {
     }
 
     //TODO set display-name in ProducerPipelineError and creating pipeline
-    fn callback_prepare_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, tee: &gst::Element, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
+    fn callback_prepare_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
         let media;
         let clock_rate;
         let encoding_name;
@@ -1453,7 +1481,8 @@ impl InputStream {
         let pay_filter = make_element("capsfilter", None)?;
         pipeline.add(&pay_filter).unwrap();
 
-        pipeline.add(tee).unwrap();
+        let tee = make_element("tee", None).unwrap();
+        pipeline.add(&tee).unwrap();
 
         let queue = make_element("queue", None)?;
         pipeline.add(&queue).unwrap();
@@ -1579,6 +1608,8 @@ impl InputStream {
                 details: err.to_string(),
             }
         })?;
+
+        self.tee = Some(tee);
 
         result
     }
@@ -1715,6 +1746,8 @@ impl WebRTCSink {
             .iter_mut()
             .for_each(|(_, stream)| stream.unprepare(element));
 
+        state.links.clear();
+
         if let Some(handle) = state.codecs_abort_handle.take() {
             handle.abort();
         }
@@ -1724,6 +1757,8 @@ impl WebRTCSink {
                 let _ = receiver.await;
             });
         }
+
+        state.pipeline.set_state(gst::State::Null)?;
 
         state.maybe_stop_signaller(element);
 
@@ -2244,7 +2279,7 @@ impl WebRTCSink {
         let mut remove = false;
 
         if let Some(mut consumer) = state.consumers.remove(&peer_id) {
-            for webrtc_pad in consumer.webrtc_pads.clone().values_mut() {
+            for webrtc_pad in consumer.webrtc_pads.clone().values() {
                 let transceiver = webrtc_pad
                     .pad
                     .property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
@@ -2255,15 +2290,28 @@ impl WebRTCSink {
                         .insert(mid.to_string(), webrtc_pad.stream_name.clone());
                 }
 
-                if let Err(err) =
-                consumer.connect_input_stream(element, webrtc_pad, &state.tee) {
+                if let Some(stream) = state
+                    .streams
+                    .get(&webrtc_pad.stream_name) {
+                        if let Err(err) =
+                        consumer.connect_input_stream(element, webrtc_pad, stream) {
+                            gst::error!(
+                                CAT,
+                                obj: element,
+                                "Failed to connect input stream {} for consumer {}: {}",
+                                webrtc_pad.stream_name,
+                                peer_id,
+                                err
+                            );
+                            remove = true;
+                            break;
+                        }
+                } else {
                     gst::error!(
                         CAT,
                         obj: element,
-                        "Failed to connect input stream {} for consumer {}: {}",
-                        webrtc_pad.stream_name,
+                        "No producer to connect consumer {} to",
                         peer_id,
-                        err
                     );
                     remove = true;
                     break;
@@ -3186,6 +3234,7 @@ impl ElementImpl for WebRTCSink {
                 out_caps: None,
                 clocksync: None,
                 payload: Some(payload.clone()),
+                tee: None,
                 ssrc: ret,
             },
         );
