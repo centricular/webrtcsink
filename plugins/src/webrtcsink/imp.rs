@@ -1394,26 +1394,41 @@ impl InputStream {
         }
     }
 
-    fn create_pipeline(&mut self, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
-        let media;
-        let clock_rate;
-        let encoding_name;
+    fn create_caps_for_pay_filter(&self, codec_name: &str) -> gst::Caps{
+        let payload = self.payload.unwrap();
+        
+        let mut struct_caps_pay = gst::Structure::builder("application/x-rtp")
+            .field("payload", payload); 
         if self.sink_pad.name().starts_with("video_") {
-            media = "video";
-            clock_rate = 90000;
-            encoding_name = "VP8"
-        }else{
-            media = "audio";
-            clock_rate = 48000;
-            encoding_name = "OPUS"
+            struct_caps_pay = struct_caps_pay.field("media", "video")
+                .field("clock-rate", 90000 as i32);
+            struct_caps_pay = match codec_name {
+                "video/x-h265" => struct_caps_pay.field("encoding-name", "H265"),
+                "video/x-h264" => struct_caps_pay.field("encoding-name", "H264"),
+                "video/x-vp8" => struct_caps_pay.field("encoding-name", "VP8"),
+                "video/x-vp9" => struct_caps_pay.field("encoding-name", "VP9"),
+                _ => struct_caps_pay.field("encoding-name", "VP8"),
+            };
+
+        } else{
+            struct_caps_pay = struct_caps_pay.field("media", "audio")
+                .field("clock-rate", 48000 as i32)
+                .field("encoding-name", "OPUS")
+                .field("encoding-params", "2")
+                .field("minptime", "10");
         }
+
+        gst::Caps::builder_full().structure(struct_caps_pay.build()).build()
+
+    }
+
+    fn create_pipeline(&mut self, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
         let payload = self.payload.unwrap();
         
         let codec = codecs
             .get(&payload)
             .ok_or_else(|| anyhow!("No codec for payload {}", payload))?;
 
-        gst::info!(CAT, "PUDIM Codec name {}", codec.caps.structure(0).unwrap().name());
 
         let appsrc = make_element("appsrc", Some(&self.sink_pad.name()))?;
         pipeline.add(&appsrc).unwrap();
@@ -1441,19 +1456,9 @@ impl InputStream {
             false,
         )?;
 
-        let struct_caps_pay = gst::Structure::builder("application/x-rtp")
-            .field("media", media)
-            .field("clock-rate", clock_rate)
-            .field("encoding-name", encoding_name)
-            .field("payload", payload);
+        gst::info!(CAT, "PUDIM Codec name {}", codec.caps.structure(0).unwrap().name());
 
-        // if self.sink_pad.name().starts_with("audio_") {
-        //     struct_caps_pay.field("encoding-params", "2")
-        //                     .field("minptime", "10");
-        // }
-
-        let caps = gst::Caps::builder_full().structure(struct_caps_pay.build()).build();
-
+        let caps = self.create_caps_for_pay_filter(codec.caps.structure(0).unwrap().name());
         pay_filter.set_property("caps", caps);
 
         let appsrc = appsrc.downcast::<gst_app::AppSrc>().unwrap();
