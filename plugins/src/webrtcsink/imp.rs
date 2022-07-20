@@ -65,6 +65,8 @@ struct Settings {
     do_retransmission: bool,
     enable_data_channel_navigation: bool,
     display_name: Option<String>,
+    min_rtp_port: i32,
+    max_rtp_port: i32,
 }
 
 /// Represents a codec we can offer
@@ -319,6 +321,8 @@ impl Default for Settings {
             do_retransmission: DEFAULT_DO_RETRANSMISSION,
             enable_data_channel_navigation: DEFAULT_ENABLE_DATA_CHANNEL_NAVIGATION,
             display_name: DEFAULT_DISPLAY_NAME.map(String::from),
+            min_rtp_port: -1i32,
+            max_rtp_port: -1i32,
         }
     }
 }
@@ -1729,6 +1733,15 @@ impl WebRTCSink {
             webrtcbin.set_property("turn-server", turn_server);
         }
 
+        let webrtc_ice: gst::Object = webrtcbin.try_property("ice-agent").unwrap();
+        if settings.min_rtp_port != -1i32 {
+            gst::info!(CAT, "Setting min rtp port on ice-agent");
+            webrtc_ice.set_property_from_value("min-rtp-port", &settings.min_rtp_port.to_value());
+        }
+        if settings.max_rtp_port != -1i32 {
+            gst::info!(CAT, "Setting max rtp port on ice-agent");
+            webrtc_ice.set_property_from_value("max-rtp-port", &settings.max_rtp_port.to_value());
+        }
         pipeline.add(&webrtcbin).unwrap();
 
         let element_clone = element.downgrade();
@@ -2612,6 +2625,24 @@ impl ObjectImpl for WebRTCSink {
                     DEFAULT_DISPLAY_NAME,
                     glib::ParamFlags::READWRITE,
                 ),
+                glib::ParamSpecInt::new(
+                    "min-rtp-port",
+                    "Min RTP Port",
+                    "Lower bound of RTP port range to use by ice-agent. -1 uses ice-agent defaults",
+                    1,
+                    i16::MAX as i32,
+                    -1,
+                    glib::ParamFlags::READWRITE,
+                ),
+                glib::ParamSpecInt::new(
+                    "max-rtp-port",
+                    "Max RTP Port",
+                    "Upper bound of RTP port range to use by ice-agent. -1 uses ice-agent defaults",
+                    1,
+                    i16::MAX as i32,
+                    -1,
+                    glib::ParamFlags::READWRITE,
+                ),
             ]
         });
 
@@ -2715,6 +2746,14 @@ impl ObjectImpl for WebRTCSink {
                 settings.display_name = value
                     .get::<Option<String>>()
                     .expect("type checked upstream")
+            }
+            "min-rtp-port" => {
+                let mut settings = self.settings.lock().unwrap();
+                settings.min_rtp_port = value.get::<i32>().expect("type checked upstream");
+            }
+            "max-rtp-port" => {
+                let mut settings = self.settings.lock().unwrap();
+                settings.max_rtp_port = value.get::<i32>().expect("type checked upstream");
             }
             _ => unimplemented!(),
         }
