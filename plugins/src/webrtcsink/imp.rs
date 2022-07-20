@@ -1088,6 +1088,19 @@ impl CongestionController {
 }
 
 impl State {
+
+    fn generate_ssrc(&self) -> u32 {
+
+        loop {
+            let ret = fastrand::u32(..);
+            if let Some(_result) = self.streams.iter().find(|(_,stream)| stream.ssrc == ret) {
+                continue;
+            }
+            return ret;
+        }
+
+    }
+
     fn prepare_pipeline(&mut self, element: &super::WebRTCSink) {
         let mut streams = self.streams.clone();
         streams.iter_mut().for_each(|(_, stream )| {         
@@ -1647,16 +1660,6 @@ impl NavigationEventHandler {
 }
 
 impl WebRTCSink {
-
-    fn generate_ssrc(&self) -> u32 {
-        loop {
-            let ret = fastrand::u32(..);
-            if let Some(_result) = self.state.lock().unwrap().streams.iter().find(|(_,stream)| stream.ssrc == ret) {
-                continue;
-            }
-            return ret;
-        }
-    }
 
     /// Build an ordered map of Codecs, given user-provided audio / video caps */
     fn lookup_codecs(&self) -> BTreeMap<i32, Codec> {
@@ -3215,16 +3218,9 @@ impl ElementImpl for WebRTCSink {
         element.add_pad(&sink_pad).unwrap();
 
         gst::info!(CAT, "PUDIM New sink pad for webrtcsink with name: {}", name);
-        let mut ret;
-        {
-            loop {
-                ret = fastrand::u32(..);
-                if let Some(_result) = state.streams.iter().find(|(_,stream)| stream.ssrc == ret) {
-                    continue;
-                }
-                break;
-            }
-        }
+
+        let srrc = state.generate_ssrc();
+
         state.streams.insert(
             name,
             InputStream {
@@ -3235,7 +3231,7 @@ impl ElementImpl for WebRTCSink {
                 clocksync: None,
                 payload: Some(payload.clone()),
                 tee: None,
-                ssrc: ret,
+                ssrc: srrc,
             },
         );
 
