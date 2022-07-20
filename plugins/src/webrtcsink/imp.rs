@@ -1097,26 +1097,6 @@ impl State {
 
     }
 
-    fn prepare_pipeline(&mut self, element: &super::WebRTCSink) {
-        let mut streams = self.streams.clone();
-        streams.iter_mut().for_each(|(_, stream )| {         
-                if let Err(err) = stream.callback_prepare_pipeline(&element, &self.pipeline, &self.codecs, &mut self.links) {
-                    gst::error!(CAT, obj: element, "error: {}", err);
-                    gst::element_error!(
-                        element,
-                        gst::StreamError::Failed,
-                        ["Failed to start pipeline {}", err]
-                    );
-                } else {
-                    gst::info!(CAT, "Pipeline Created")
-                }
-            }
-        );
-
-        self.streams = streams;
-        
-    }
-
     fn finalize_consumer(
         &mut self,
         element: &super::WebRTCSink,
@@ -1414,8 +1394,7 @@ impl InputStream {
         }
     }
 
-    //TODO set display-name in ProducerPipelineError and creating pipeline
-    fn callback_prepare_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
+    fn create_pipeline(&mut self, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
         let media;
         let clock_rate;
         let encoding_name;
@@ -1428,7 +1407,6 @@ impl InputStream {
             clock_rate = 48000;
             encoding_name = "OPUS"
         }
-        let clock = element.clock();
         let payload = self.payload.unwrap();
         
         let codec = codecs
@@ -1463,11 +1441,6 @@ impl InputStream {
             false,
         )?;
 
-        // element.emit_by_name::<bool>(
-        //     "encoder-setup",
-        //     &[&&self.sink_pad.name(), &enc],
-        // );
-
         let struct_caps_pay = gst::Structure::builder("application/x-rtp")
             .field("media", media)
             .field("clock-rate", clock_rate)
@@ -1492,64 +1465,6 @@ impl InputStream {
             }
         })?;
 
-        pipeline.use_clock(clock.as_ref());
-        pipeline.set_start_time(gst::ClockTime::NONE);
-        pipeline.set_base_time(element.base_time().unwrap());
-
-        let mut bus_stream = pipeline.bus().unwrap().stream();
-        let element_clone = element.downgrade();
-        let pipeline_clone = pipeline.downgrade();
-        //let peer_id_clone = peer_id.to_owned();
-
-        task::spawn(async move {
-            while let Some(msg) = bus_stream.next().await {
-                if let Some(_element) = element_clone.upgrade() {
-                    //let this = Self::from_instance(&element);
-                    match msg.view() {
-                        gst::MessageView::Error(err) => {
-                            gst::error!(
-                                CAT,
-                                "Producer error: {}, details: {:?}",
-                                err.error(),
-                                err.debug()
-                            );
-                            //let _ = this.remove_consumer(&element, &peer_id_clone, true);
-                        }
-                        gst::MessageView::StateChanged(state_changed) => {
-                            if let Some(pipeline) = pipeline_clone.upgrade() {
-                                if Some(pipeline.clone().upcast()) == state_changed.src() {
-                                    gst::info!(CAT,
-                                        "Pudim Dot of change of state in producer pipeline");
-                                    pipeline.debug_to_dot_file_with_ts(
-                                        gst::DebugGraphDetails::all(),
-                                        format!(
-                                            "webrtcsink-producer-peer-{:?}-to-{:?}",
-                                            state_changed.old(),
-                                            state_changed.current()
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                        gst::MessageView::Latency(..) => {
-                            if let Some(pipeline) = pipeline_clone.upgrade() {
-                                gst::info!(CAT, obj: &pipeline, "Recalculating latency");
-                                let _ = pipeline.recalculate_latency();
-                            }
-                        }
-                        gst::MessageView::Eos(..) => {
-                            gst::error!(
-                                CAT,
-                                "Unexpected end of stream for producer",
-                            );
-                            //let _ = this.remove_consumer(&element, &peer_id_clone, true);
-                        }
-                        _ => (),
-                    }
-                }
-            }
-        });
-
         let result = match self.producer.as_ref().unwrap().add_consumer(&appsrc) {
             Ok(link) => {
                 links.insert(self.sink_pad.name().to_string(), link);
@@ -1564,12 +1479,6 @@ impl InputStream {
 
         gst::Element::link_many(&[&pay, &pay_filter, &tee, &queue, &fakesink])
         .with_context(|| "Linking encoding elements")?;
-
-        pipeline.set_state(gst::State::Playing).map_err(|err| {
-            WebRTCSinkError::ProducerPipelineError {
-                details: err.to_string(),
-            }
-        })?;
 
         self.tee = Some(tee);
 
@@ -1609,6 +1518,92 @@ impl NavigationEventHandler {
 }
 
 impl WebRTCSink {
+
+    fn prepare_pipeline(&self, element: &super::WebRTCSink, state: &mut State) {
+        let mut streams = state.streams.clone();
+        streams.iter_mut().for_each(|(_, stream )| {         
+                if let Err(err) = stream.create_pipeline(&state.pipeline, &state.codecs, &mut state.links) {
+                    gst::error!(CAT, obj: element, "error: {}", err);
+                    gst::element_error!(
+                        element,
+                        gst::StreamError::Failed,
+                        ["Failed to start pipeline {}", err]
+                    );
+                } else {
+                    gst::info!(CAT, "Pipeline Created")
+                }
+            }
+        );
+
+        state.streams = streams;
+
+        let clock = element.clock();
+        state.pipeline.use_clock(clock.as_ref());
+        state.pipeline.set_start_time(gst::ClockTime::NONE);
+        state.pipeline.set_base_time(element.base_time().unwrap());
+
+        let mut bus_stream = state.pipeline.bus().unwrap().stream();
+        let element_clone = element.downgrade();
+        let pipeline_clone = state.pipeline.downgrade();
+
+        task::spawn(async move {
+            while let Some(msg) = bus_stream.next().await {
+                if let Some(element) = element_clone.upgrade() {
+                    let this = Self::from_instance(&element);
+                    match msg.view() {
+                        gst::MessageView::Error(err) => {
+                            gst::error!(
+                                CAT,
+                                "Producer error: {}, details: {:?}",
+                                err.error(),
+                                err.debug()
+                            );
+                            let _ = this.unprepare(&element);
+                        }
+                        gst::MessageView::StateChanged(state_changed) => {
+                            if let Some(pipeline) = pipeline_clone.upgrade() {
+                                if Some(pipeline.clone().upcast()) == state_changed.src() {
+                                    gst::info!(CAT,
+                                        "Pudim Dot of change of state in producer pipeline");
+                                    pipeline.debug_to_dot_file_with_ts(
+                                        gst::DebugGraphDetails::all(),
+                                        format!(
+                                            "webrtcsink-producer-peer-{:?}-to-{:?}",
+                                            state_changed.old(),
+                                            state_changed.current()
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        gst::MessageView::Latency(..) => {
+                            if let Some(pipeline) = pipeline_clone.upgrade() {
+                                gst::info!(CAT, obj: &pipeline, "Recalculating latency");
+                                let _ = pipeline.recalculate_latency();
+                            }
+                        }
+                        gst::MessageView::Eos(..) => {
+                            gst::error!(
+                                CAT,
+                                "Unexpected end of stream for producer",
+                            );
+                             let _ = this.unprepare(&element);
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        });
+
+       if state.pipeline.set_state(gst::State::Playing).map_err(|err| {
+            WebRTCSinkError::ProducerPipelineError {
+                details: err.to_string(),
+            }
+        }).is_err() {
+            let _ = self.unprepare(element);
+        }
+
+    }
 
     /// Build an ordered map of Codecs, given user-provided audio / video caps */
     fn lookup_codecs(&self) -> BTreeMap<i32, Codec> {
@@ -2592,7 +2587,7 @@ impl WebRTCSink {
                                         let mut state = this.state.lock().unwrap();
                                         gst::info!(CAT, "PUDIM Codec Discovery Done, will start signaller");
                                         state.codec_discovery_done = true;
-                                        state.prepare_pipeline(&element);
+                                        this.prepare_pipeline(&element, &mut state);
                                         state.maybe_start_signaller(&element);
                                     }
                                     _ => (),
