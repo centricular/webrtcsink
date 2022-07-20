@@ -97,6 +97,7 @@ struct InputStream {
     clocksync: Option<gst::Element>,
     // Payload according being video or audio
     payload: Option<i32>,
+    // Tee associated in each stream, to connect all consumers
     tee: Option<gst::Element>,
     /// Saves ssrc for all the consumers
     ssrc: u32,
@@ -106,15 +107,10 @@ struct InputStream {
 #[derive(Clone)]
 struct WebRTCPad {
     pad: gst::Pad,
-    // The (fixed) caps of the corresponding input stream
-    //in_caps: gst::Caps,
     // The m= line index in the SDP
     media_idx: u32,
-    //ssrc: u32,
     // The name of the corresponding InputStream's sink_pad
     stream_name: String,
-    // The payload selected in the answer, None at first
-    //payload: Option<i32>,
 }
 
 /// Wrapper around GStreamer encoder element, keeps track of factory
@@ -1326,59 +1322,14 @@ impl Consumer {
         webrtc_pad: &WebRTCPad,
         stream: &InputStream,
     ) -> Result<(), Error> {
+
         gst::info!(
             CAT,
             obj: element,
             "Connecting input stream {} for consumer {}",
             webrtc_pad.stream_name,
             self.peer_id
-        );
-        //let payload = webrtc_pad.payload.unwrap();
-        
-
-        // At this point, the peer has provided its answer, and we want to
-        // let the payloader / encoder perform negotiation according to that.
-        //
-        // This means we need to unset our codec preferences, as they would now
-        // conflict with what the peer actually requested (see webrtcbin's
-        // caps query implementation), and instead install a capsfilter downstream
-        // of the payloader with caps constructed from the relevant SDP media.
-        
-        // let transceiver = webrtc_pad
-        //     .pad
-        //     .property::<gst_webrtc::WebRTCRTPTransceiver>("transceiver");
-        // transceiver.set_property("codec-preferences", None::<gst::Caps>);
-
-
-        // if codec.is_video() {
-        //     let video_info = gst_video::VideoInfo::from_caps(&webrtc_pad.in_caps)?;
-        //     let mut enc = VideoEncoder::new(
-        //         enc,
-        //         raw_filter,
-        //         video_info,
-        //         &self.peer_id,
-        //         codec.caps.structure(0).unwrap().name(),
-        //         transceiver,
-        //     );
-
-        //     if let Some(congestion_controller) = self.congestion_controller.as_mut() {
-        //         congestion_controller.target_bitrate_on_delay += enc.bitrate();
-        //         congestion_controller.target_bitrate_on_loss =
-        //             congestion_controller.target_bitrate_on_delay;
-        //         enc.transceiver.set_property("fec-percentage", 0u32);
-        //     } else {
-        //         /* If congestion control is disabled, we simply use the highest
-        //          * known "safe" value for the bitrate. */
-        //         enc.set_bitrate(element, self.max_bitrate as i32);
-        //         enc.transceiver.set_property("fec-percentage", 50u32);
-        //     }
-
-        //     self.encoders.push(enc);
-        // }
-
-        // pipeline
-        //     .sync_children_states()
-        //     .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
+        );    
 
         let pad_template = stream.tee.as_ref().unwrap().pad_template("src_%u").unwrap();
         let tee_pad = stream.tee.as_ref().unwrap().request_pad(&pad_template, None, None).unwrap();
@@ -1393,7 +1344,6 @@ impl Consumer {
             .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
         
         self.webrtcbin.call_async(move |webrtcbin| {
-            // If this fails, post an error on the bus so we exit
             if webrtcbin.sync_state_with_parent().is_err() {
                 gst::error!(
                     CAT,
@@ -1402,7 +1352,6 @@ impl Consumer {
                 );
             }
 
-            // And now unblock
             tee_pad.remove_probe(tee_block);
         });
 
@@ -2078,8 +2027,6 @@ impl WebRTCSink {
             settings.max_bitrate,
         );
 
-
-
         if consumer.congestion_controller.is_some() {
             let rtpbin = webrtcbin
             .dynamic_cast_ref::<gst::ChildProxy>()
@@ -2116,66 +2063,6 @@ impl WebRTCSink {
             .iter()
             .for_each(|(_, stream)| consumer.request_webrtcbin_pad(element, &settings, stream));
 
-        // let clock = element.clock();
-
-        // pipeline.use_clock(clock.as_ref());
-        // pipeline.set_start_time(gst::ClockTime::NONE);
-        // pipeline.set_base_time(element.base_time().unwrap());
-
-        // let mut bus_stream = state.pipeline.bus().unwrap().stream();
-        // let element_clone = element.downgrade();
-        // let pipeline_clone = state.pipeline.downgrade();
-        // let peer_id_clone = peer_id.to_owned();
-
-        // task::spawn(async move {
-        //     while let Some(msg) = bus_stream.next().await {
-        //         if let Some(element) = element_clone.upgrade() {
-        //             let this = Self::from_instance(&element);
-        //             match msg.view() {
-        //                 gst::MessageView::Error(err) => {
-        //                     gst::error!(
-        //                         CAT,
-        //                         "Consumer {} error: {}, details: {:?}",
-        //                         peer_id_clone,
-        //                         err.error(),
-        //                         err.debug()
-        //                     );
-        //                     let _ = this.remove_consumer(&element, &peer_id_clone, true);
-        //                 }
-        //                 gst::MessageView::StateChanged(state_changed) => {
-        //                     if let Some(pipeline) = pipeline_clone.upgrade() {
-        //                         if Some(pipeline.clone().upcast()) == state_changed.src() {
-        //                             pipeline.debug_to_dot_file_with_ts(
-        //                                 gst::DebugGraphDetails::all(),
-        //                                 format!(
-        //                                     "webrtcsink-peer-{}-{:?}-to-{:?}",
-        //                                     peer_id_clone,
-        //                                     state_changed.old(),
-        //                                     state_changed.current()
-        //                                 ),
-        //                             );
-        //                         }
-        //                     }
-        //                 }
-        //                 gst::MessageView::Latency(..) => {
-        //                     if let Some(pipeline) = pipeline_clone.upgrade() {
-        //                         gst::info!(CAT, obj: &pipeline, "Recalculating latency");
-        //                         let _ = pipeline.recalculate_latency();
-        //                     }
-        //                 }
-        //                 gst::MessageView::Eos(..) => {
-        //                     gst::error!(
-        //                         CAT,
-        //                         "Unexpected end of stream for consumer {}",
-        //                         peer_id_clone
-        //                     );
-        //                     let _ = this.remove_consumer(&element, &peer_id_clone, true);
-        //                 }
-        //                 _ => (),
-        //             }
-        //         }
-        //     }
-        // });
 
         webrtcbin.set_state(gst::State::Ready).map_err(|err| {
             WebRTCSinkError::ConsumerPipelineError {
@@ -2207,13 +2094,6 @@ impl WebRTCSink {
         // This is completely safe, as we know that by now all conditions are gathered:
         // webrtcbin is in the Ready state, and all its transceivers have codec_preferences.
         self.negotiate(element, peer_id);
-
-        // pipeline.set_state(gst::State::Playing).map_err(|err| {
-        //     WebRTCSinkError::ConsumerPipelineError {
-        //         peer_id: peer_id.to_string(),
-        //         details: err.to_string(),
-        //     }
-        // })?;
 
         webrtcbin.sync_state_with_parent().unwrap();
         
