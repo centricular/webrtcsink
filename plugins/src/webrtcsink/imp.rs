@@ -1124,16 +1124,16 @@ impl State {
                 
                 tee.release_request_pad(&tee_src_pad);
 
+                tee_sink_pad.remove_probe(tee_block);
+
                 if it.peek().is_none() {
                     gst::info!(CAT,"PUDIM Last one");
                     let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
                     
                     let pipeline_clone = self.pipeline.downgrade();
-
+                        
                     webrtcbin.call_async(move |webrtcbin| {
                         let pipeline = pipeline_clone.upgrade().unwrap();
-
-                        tee_sink_pad.remove_probe(tee_block);
                         
                         pipeline.remove(webrtcbin).unwrap(); 
     
@@ -1413,9 +1413,7 @@ impl InputStream {
         } else{
             struct_caps_pay = struct_caps_pay.field("media", "audio")
                 .field("clock-rate", 48000 as i32)
-                .field("encoding-name", "OPUS")
-                .field("encoding-params", "2")
-                .field("minptime", "10");
+                .field("encoding-name", "OPUS");
         }
 
         gst::Caps::builder_full().structure(struct_caps_pay.build()).build()
