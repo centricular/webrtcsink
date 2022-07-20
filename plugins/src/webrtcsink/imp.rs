@@ -1143,7 +1143,14 @@ impl State {
                 } 
 
             }
-
+            else {
+                gst::debug!(
+                    CAT,
+                    obj: element,
+                    "Webrtc pad {} is not linked to tee pad",
+                    webrtc_pad.pad.name()
+                );
+            } 
 
         }
 
@@ -1571,7 +1578,8 @@ impl WebRTCSink {
                                     pipeline.debug_to_dot_file_with_ts(
                                         gst::DebugGraphDetails::all(),
                                         format!(
-                                            "webrtcsink-producer-peer-{:?}-to-{:?}",
+                                            "webrtcsink-producer-peer-{:?}-{:?}-to-{:?}",
+                                            this.settings.lock().unwrap().display_name,
                                             state_changed.old(),
                                             state_changed.current()
                                         ),
