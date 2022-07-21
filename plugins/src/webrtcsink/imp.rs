@@ -1452,7 +1452,7 @@ impl InputStream {
         pipeline.add(&fakesink).unwrap();
 
 
-        let (_enc, _raw_filter, pay) = setup_encoding(
+        let (enc, _raw_filter, pay) = setup_encoding(
             &pipeline,
             &appsrc,
             self.in_caps.as_ref().unwrap(),
@@ -1460,6 +1460,11 @@ impl InputStream {
             None,
             false,
         )?;
+
+        element.emit_by_name::<bool>(
+            "encoder-setup",
+            &[&stream.sink_pad.name(), &enc],
+        );
 
         gst::info!(CAT, "PUDIM Codec name {}", codec.caps.structure(0).unwrap().name());
 
@@ -2970,7 +2975,6 @@ impl ObjectImpl for WebRTCSink {
                     "encoder-setup",
                     &[
                         String::static_type().into(),
-                        String::static_type().into(),
                         gst::Element::static_type().into(),
                     ],
                     bool::static_type().into(),
@@ -2978,7 +2982,7 @@ impl ObjectImpl for WebRTCSink {
                 .accumulator(|_hint, _ret, value| !value.get::<bool>().unwrap())
                 .class_handler(|_, args| {
                     let element = args[0].get::<super::WebRTCSink>().expect("signal arg");
-                    let enc = args[3].get::<gst::Element>().unwrap();
+                    let enc = args[2].get::<gst::Element>().unwrap();
 
                     gst::debug!(
                         CAT,
