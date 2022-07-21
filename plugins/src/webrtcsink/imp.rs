@@ -1107,47 +1107,68 @@ impl State {
 
         while let Some((_, webrtc_pad)) = it.next()  {
             
-            if let Some(tee_src_pad) = webrtc_pad.pad.peer() {    
-
-                let tee = tee_src_pad.parent_element().unwrap();
-                gst::info!(CAT, "PUDIM tee name {}",tee_src_pad.name());
-
-                let tee_sink_pad = tee.static_pad("sink").unwrap();
-
-                let tee_block = tee_sink_pad
-                    .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
-                        gst::PadProbeReturn::Ok
-                    })
-                    .unwrap();
-
-                tee_src_pad.unlink(&webrtc_pad.pad).unwrap();
+            if let Some(queue_src_pad) = webrtc_pad.pad.peer(){
                 
-                tee.release_request_pad(&tee_src_pad);
+                let queue = queue_src_pad.parent_element().unwrap();
 
-                tee_sink_pad.remove_probe(tee_block);
+                let queue_sink_pad = queue.static_pad("sink").unwrap();
 
-                if it.peek().is_none() {
-                    gst::info!(CAT,"PUDIM Last one");
-                    let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
+                if let Some(tee_src_pad) = queue_sink_pad.peer(){
+                
+                    let tee = tee_src_pad.parent_element().unwrap();
+                    gst::info!(CAT, "PUDIM tee name {}",tee_src_pad.name());
+
+                    let tee_sink_pad = tee.static_pad("sink").unwrap();
+
+                    let tee_block = tee_sink_pad
+                        .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
+                            gst::PadProbeReturn::Ok
+                        })
+                        .unwrap();
                     
-                    let pipeline_clone = self.pipeline.downgrade();
-                        
-                    webrtcbin.call_async(move |webrtcbin| {
-                        let pipeline = pipeline_clone.upgrade().unwrap();
-                        
-                        pipeline.remove(webrtcbin).unwrap(); 
-    
-                        webrtcbin.set_state(gst::State::Null).unwrap();
-                    });
-    
-                } 
+                    queue_src_pad.unlink(&webrtc_pad.pad).unwrap();
+
+                    tee_src_pad.unlink(&queue_sink_pad).unwrap();
+                    
+                    tee.release_request_pad(&tee_src_pad);
+
+                    tee_sink_pad.remove_probe(tee_block);
+
+                    queue.set_state(gst::State::Null).unwrap();
+                    self.pipeline.remove(&queue).unwrap();
+
+                    if it.peek().is_none() {
+                        gst::info!(CAT,"PUDIM Last one");
+                        let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
+                            
+                        if webrtcbin.set_state(gst::State::Null).is_err() {
+                            gst::error!(
+                                CAT,
+                                obj: &webrtcbin,
+                                "Failed to set webrtcbin to Playing"
+                            );
+                        }
+
+                        self.pipeline.remove(&webrtcbin).unwrap(); 
+
+        
+                    } 
+                }
+                else {
+                    gst::debug!(
+                        CAT,
+                        obj: element,
+                        "Queue pad {} is not linked to tee pad",
+                        webrtc_pad.pad.name()
+                    )
+                }
 
             }
             else {
                 gst::debug!(
                     CAT,
                     obj: element,
-                    "Webrtc pad {} is not linked to tee pad",
+                    "Webrtc pad {} is not linked to queue pad",
                     webrtc_pad.pad.name()
                 );
             } 
@@ -1308,6 +1329,7 @@ impl Consumer {
         element: &super::WebRTCSink,
         webrtc_pad: &WebRTCPad,
         stream: &InputStream,
+        pipeline: &gst::Pipeline,
     ) -> Result<(), Error> {
 
         gst::info!(
@@ -1316,7 +1338,12 @@ impl Consumer {
             "Connecting input stream {} for consumer {}",
             webrtc_pad.stream_name,
             self.peer_id
-        );    
+        );
+
+        let queue = make_element("queue", None)?;
+        pipeline.add(&queue).unwrap();
+        queue.sync_state_with_parent().unwrap();
+        let queue_src = queue.static_pad("src").unwrap();
 
         let pad_template = stream.tee.as_ref().unwrap().pad_template("src_%u").unwrap();
         let tee_pad = stream.tee.as_ref().unwrap().request_pad(&pad_template, None, None).unwrap();
@@ -1327,21 +1354,21 @@ impl Consumer {
             })
             .unwrap();
         
-        tee_pad.link(&webrtc_pad.pad)
+        stream.tee.as_ref().unwrap().link(&queue)?;
+
+        queue_src.link(&webrtc_pad.pad)
             .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
         
-        self.webrtcbin.call_async(move |webrtcbin| {
-            if webrtcbin.sync_state_with_parent().is_err() {
-                gst::error!(
-                    CAT,
-                    obj: webrtcbin,
-                    "Failed to set webrtcbin to Playing"
-                );
-            }
 
-            tee_pad.remove_probe(tee_block);
-        });
+        if self.webrtcbin.sync_state_with_parent().is_err() {
+            gst::error!(
+                CAT,
+                obj: &self.webrtcbin,
+                "Failed to set webrtcbin to Playing"
+            );
+        }
 
+        tee_pad.remove_probe(tee_block);
                
         Ok(())
     }
@@ -2188,7 +2215,7 @@ impl WebRTCSink {
                     .streams
                     .get(&webrtc_pad.stream_name) {
                         if let Err(err) =
-                        consumer.connect_input_stream(element, webrtc_pad, stream) {
+                        consumer.connect_input_stream(element, webrtc_pad, stream, &state.pipeline) {
                             gst::error!(
                                 CAT,
                                 obj: element,
