@@ -1427,7 +1427,7 @@ impl InputStream {
 
     }
 
-    fn create_pipeline(&mut self, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
+    fn create_pipeline(&mut self, element: &super::WebRTCSink, pipeline: &gst::Pipeline, codecs: &BTreeMap<i32, Codec>, links: &mut HashMap<String, gst_utils::ConsumptionLink>) -> Result<(), Error> {
         let payload = self.payload.unwrap();
         
         let codec = codecs
@@ -1463,7 +1463,7 @@ impl InputStream {
 
         element.emit_by_name::<bool>(
             "encoder-setup",
-            &[&stream.sink_pad.name(), &enc],
+            &[&self.sink_pad.name(), &enc],
         );
 
         gst::info!(CAT, "PUDIM Codec name {}", codec.caps.structure(0).unwrap().name());
@@ -1537,7 +1537,7 @@ impl WebRTCSink {
     fn prepare_pipeline(&self, element: &super::WebRTCSink, state: &mut State) {
         let mut streams = state.streams.clone();
         streams.iter_mut().for_each(|(_, stream )| {         
-                if let Err(err) = stream.create_pipeline(&state.pipeline, &state.codecs, &mut state.links) {
+                if let Err(err) = stream.create_pipeline(&element, &state.pipeline, &state.codecs, &mut state.links) {
                     gst::error!(CAT, obj: element, "error: {}", err);
                     gst::element_error!(
                         element,
