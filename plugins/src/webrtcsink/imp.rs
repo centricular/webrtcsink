@@ -1106,6 +1106,7 @@ impl State {
         let mut it = consumer.webrtc_pads.iter().peekable();
 
         while let Some((_, webrtc_pad)) = it.next()  {
+            gst::info!(CAT,"PUDIM Webrtc pad: {}", webrtc_pad.pad.name());
             
             if let Some(queue_src_pad) = webrtc_pad.pad.peer(){
                 
@@ -1137,21 +1138,31 @@ impl State {
                     queue.set_state(gst::State::Null).unwrap();
                     self.pipeline.remove(&queue).unwrap();
 
+                    let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
+                    gst::info!(CAT, "PUDIM Webrtcbin name: {}", webrtcbin.name());
+
                     if it.peek().is_none() {
-                        gst::info!(CAT,"PUDIM Last one");
+                        gst::info!(CAT,"PUDIM Last one: {}", webrtc_pad.pad.name());
+
                         let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
-                            
-                        if webrtcbin.set_state(gst::State::Null).is_err() {
-                            gst::error!(
-                                CAT,
-                                obj: &webrtcbin,
-                                "Failed to set webrtcbin to Playing"
-                            );
-                        }
 
-                        self.pipeline.remove(&webrtcbin).unwrap(); 
+                        let pipeline_clone = self.pipeline.downgrade();
+    
+                        webrtcbin.call_async(move |webrtcbin| {
+                            let pipeline = pipeline_clone.upgrade().unwrap();
+    
+                            if webrtcbin.set_state(gst::State::Null).is_err() {
+                                gst::error!(
+                                    CAT,
+                                    obj: webrtcbin,
+                                    "Failed to set webrtcbin to Playing"
+                                );
+                            }
 
-        
+                            pipeline.remove(webrtcbin).unwrap(); 
+                            gst::info!(CAT,"PUDIM Removed webrtcbin from pipeline");        
+
+                        });
                     } 
                 }
                 else {
@@ -2154,7 +2165,10 @@ impl WebRTCSink {
 
         if let Some(consumer) = state.remove_consumer(element, peer_id, signal) {
             drop(state);
+            gst::info!(CAT, "VERDE going to emit signal");
             element.emit_by_name::<()>("consumer-removed", &[&peer_id, &consumer.webrtcbin]);
+            gst::info!(CAT, "VERDE going to emitted signal");
+
         }
 
         Ok(())
