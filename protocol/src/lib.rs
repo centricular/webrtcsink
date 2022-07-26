@@ -10,19 +10,50 @@ pub enum RegisteredMessage {
     #[serde(rename_all = "camelCase")]
     Producer {
         peer_id: String,
-        display_name: Option<String>,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
     },
     /// Registered as a consumer
     #[serde(rename_all = "camelCase")]
     Consumer {
         peer_id: String,
-        display_name: Option<String>,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
     },
     /// Registered as a listener
     #[serde(rename_all = "camelCase")]
     Listener {
         peer_id: String,
-        display_name: Option<String>,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(tag = "peerType")]
+#[serde(rename_all = "camelCase")]
+/// Confirms registration
+pub enum UnRegisteredMessage {
+    /// UnRegistered as a producer
+    #[serde(rename_all = "camelCase")]
+    Producer {
+        peer_id: String,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
+    },
+    /// UnRegistered as a consumer
+    #[serde(rename_all = "camelCase")]
+    Consumer {
+        peer_id: String,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
+    },
+    /// UnRegistered as a listener
+    #[serde(rename_all = "camelCase")]
+    Listener {
+        peer_id: String,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
     },
 }
 
@@ -30,7 +61,8 @@ pub enum RegisteredMessage {
 #[serde(rename_all = "camelCase")]
 pub struct Peer {
     pub id: String,
-    pub display_name: Option<String>,
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -40,17 +72,21 @@ pub struct Peer {
 pub enum OutgoingMessage {
     /// Confirms registration
     Registered(RegisteredMessage),
+    /// Confirms registration
+    UnRegistered(UnRegisteredMessage),
     /// Notifies listeners that a producer was registered
     #[serde(rename_all = "camelCase")]
     ProducerAdded {
         peer_id: String,
-        display_name: Option<String>,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
     },
     /// Notifies listeners that a producer was removed
     #[serde(rename_all = "camelCase")]
     ProducerRemoved {
         peer_id: String,
-        display_name: Option<String>,
+        #[serde(default)]
+        meta: Option<serde_json::Value>,
     },
     /// Instructs a peer to generate an offer
     #[serde(rename_all = "camelCase")]
@@ -75,20 +111,36 @@ pub enum RegisterMessage {
     #[serde(rename_all = "camelCase")]
     Producer {
         #[serde(default)]
-        display_name: Option<String>,
+        meta: Option<serde_json::Value>,
     },
     /// Register as a consumer
     #[serde(rename_all = "camelCase")]
     Consumer {
         #[serde(default)]
-        display_name: Option<String>,
+        meta: Option<serde_json::Value>,
     },
     /// Register as a listener
     #[serde(rename_all = "camelCase")]
     Listener {
         #[serde(default)]
-        display_name: Option<String>,
+        meta: Option<serde_json::Value>,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "peerType")]
+#[serde(rename_all = "camelCase")]
+/// Register with a peer type
+pub enum UnRegisterMessage {
+    /// UnRegister a producer
+    #[serde(rename_all = "camelCase")]
+    Producer,
+    /// UnRegister a consumer
+    #[serde(rename_all = "camelCase")]
+    Consumer,
+    /// UnRegister a listener
+    #[serde(rename_all = "camelCase")]
+    Listener,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -157,6 +209,8 @@ pub struct EndSessionMessage {
 pub enum IncomingMessage {
     /// Register as a peer type
     Register(RegisterMessage),
+    /// UnRegister as a peer type
+    UnRegister(UnRegisterMessage),
     /// Start a session with a producer peer
     StartSession(StartSessionMessage),
     /// End an existing session
