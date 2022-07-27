@@ -17,7 +17,7 @@ pin_project! {
         stream: Pin<Box<dyn Stream<Item=(String, Option<p::IncomingMessage>)> + Send>>,
         items: VecDeque<(String, p::OutgoingMessage)>,
         producers: HashMap<PeerId, HashSet<PeerId>>,
-        consumers: HashMap<PeerId, Option<PeerId>>,
+        consumers: HashMap<PeerId, HashSet<PeerId>>,
         listeners: HashSet<PeerId>,
         meta: HashMap<PeerId, Option<serde_json::Value>>,
     }
@@ -140,11 +140,13 @@ impl Handler {
         self.remove_consumer_peer(peer_id);
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn remove_producer_peer(&mut self, peer_id: &str) {
         if let Some(consumers) = self.producers.remove(peer_id) {
             for consumer_id in &consumers {
                 info!(producer_id=%peer_id, consumer_id=%consumer_id, "ended session");
-                self.consumers.insert(consumer_id.clone(), None);
+                // Relation between the consumer and producer will be removed
+                // when handling EndSession
                 self.items.push_back((
                     consumer_id.to_string(),
                     p::OutgoingMessage::EndSession(p::EndSessionMessage::Producer{
@@ -168,22 +170,25 @@ impl Handler {
         }
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn remove_consumer_peer(&mut self, peer_id: &str) {
-        if let Some(Some(producer_id)) = self.consumers.remove(peer_id) {
-            info!(producer_id=%producer_id, consumer_id=%peer_id, "ended session");
+        self.consumers.remove(peer_id).map(|producers|
+            producers.iter().for_each(|producer_id| {
+                info!(producer_id=%producer_id, consumer_id=%peer_id, "ended session");
 
-            self.producers
-                .get_mut(&producer_id)
-                .unwrap()
-                .remove(peer_id);
+                self.producers
+                    .get_mut(producer_id)
+                    .unwrap()
+                    .remove(peer_id);
 
-            self.items.push_back((
-                producer_id.to_string(),
-                p::OutgoingMessage::EndSession(p::EndSessionMessage::Consumer{
-                    peer_id: peer_id.to_string()
-                }),
-            ));
-        }
+                self.items.push_back((
+                    producer_id.to_string(),
+                    p::OutgoingMessage::EndSession(p::EndSessionMessage::Consumer{
+                        peer_id: peer_id.to_string()
+                    }),
+                ));
+            })
+        );
 
         let _ = self.meta.remove(peer_id);
     }
@@ -192,24 +197,26 @@ impl Handler {
     /// End a session between two peers
     fn end_session(&mut self, from_consumer: bool, peer_id: &str, other_peer_id: &str) -> Result<(), Error> {
         if from_consumer {
-            eprintln!("END SESSION FROM CONSU {peer_id} {:?}", self.consumers);
-            if let Some(Some(_producer_id)) = self.consumers.get(peer_id) {
-                info!(producer_id=%other_peer_id, consumer_id=%peer_id, "ended session");
+            if let Some(producers) = self.consumers.get(peer_id) {
+                if producers.contains(other_peer_id) {
+                    info!(producer_id=%other_peer_id, consumer_id=%peer_id, "ended session");
 
-                self.consumers.insert(peer_id.to_string(), None);
-                self.producers
-                    .get_mut(other_peer_id)
-                    .unwrap()
-                    .remove(peer_id);
+                    self.consumers.get_mut(&peer_id.to_string()).unwrap().remove(other_peer_id);
+                    // The producer can have been removed and we are finalizing the session
+                    // afterward
+                    if let Some(producers) = self.producers.get_mut(other_peer_id) {
+                        producers.remove(peer_id);
+                    }
 
-                self.items.push_back((
-                    other_peer_id.to_string(),
-                    p::OutgoingMessage::EndSession(p::EndSessionMessage::Consumer{
-                        peer_id: peer_id.to_string(),
-                    }),
-                ));
+                    self.items.push_back((
+                        other_peer_id.to_string(),
+                        p::OutgoingMessage::EndSession(p::EndSessionMessage::Consumer{
+                            peer_id: peer_id.to_string(),
+                        }),
+                    ));
 
-                return Ok(());
+                    return Ok(());
+                }
             }
         } else if let Some(ref mut consumers) = self.producers.get_mut(peer_id) {
             if consumers.remove(other_peer_id) {
@@ -222,7 +229,7 @@ impl Handler {
                     ),
                 ));
 
-                self.consumers.insert(other_peer_id.to_string(), None);
+                self.consumers.get_mut(other_peer_id).unwrap().remove(peer_id);
                 return Ok(())
             }
         }
@@ -259,6 +266,88 @@ impl Handler {
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self))]
+    fn handle_consumer_ice(
+        &mut self,
+        candidate: String,
+        sdp_m_line_index: u32,
+        consumer_id: &str,
+        producer_id: &str,
+    ) -> Result<(), Error> {
+        let err_fn = || -> Error{
+            anyhow!(
+                "cannot forward ICE from consumer={} to producer={} as they are not in a session",
+                consumer_id,
+                producer_id
+            )
+        };
+
+        let producers = self.consumers.get(consumer_id).ok_or_else(|| { err_fn() })?;
+        if !producers.contains(producer_id) {
+            warn!("{producer_id} not contained");
+            return Err(err_fn());
+        }
+
+        let info = p::PeerMessageInfo {
+            peer_id: consumer_id.to_string(),
+            peer_message: p::PeerMessageInner::Ice {
+                candidate,
+                sdp_m_line_index,
+            },
+        };
+        self.items.push_back((
+            producer_id.to_string(),
+            p::OutgoingMessage::Peer(p::PeerMessage::Consumer(info))
+        ));
+
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    fn handle_producer_ice(
+        &mut self,
+        candidate: String,
+        sdp_m_line_index: u32,
+        producer_id: &str,
+        consumer_id: &str,
+    ) -> Result<(), Error> {
+        let err_fn = || -> Error{
+                warn!(
+                    "cannot forward ICE from producer={} to consumer={} as they are not in a session -- {:?}",
+                    producer_id,
+                    consumer_id,
+                    self.consumers,
+                );
+                anyhow!(
+                    "cannot forward ICE from producer={} to consumer={} as they are not in a session",
+                    producer_id,
+                    consumer_id,
+                )
+
+        };
+
+
+        let consumers = self.producers.get(producer_id).ok_or_else(|| { err_fn() })?;
+        if !consumers.contains(consumer_id) {
+            return Err(err_fn());
+        }
+
+        let info = p::PeerMessageInfo {
+            peer_id: producer_id.to_string(),
+            peer_message: p::PeerMessageInner::Ice {
+                candidate,
+                sdp_m_line_index,
+            },
+        };
+
+        self.items.push_back((
+            consumer_id.to_string(),
+            p::OutgoingMessage::Peer(p::PeerMessage::Producer(info)))
+        );
+
+        Ok(())
+    }
+
     /// Handle ICE candidate sent by one peer to another peer
     #[instrument(level = "debug", skip(self))]
     fn handle_ice(
@@ -269,70 +358,12 @@ impl Handler {
         peer_id: &str,
         other_peer_id: &str,
     ) -> Result<(), Error> {
-        if let Some(consumers) = self.producers.get(peer_id) {
-            if consumers.contains(other_peer_id) {
-                let info = p::PeerMessageInfo {
-                    peer_id: peer_id.to_string(),
-                    peer_message: p::PeerMessageInner::Ice {
-                        candidate,
-                        sdp_m_line_index,
-                    },
-                };
-                self.items.push_back((
-                    other_peer_id.to_string(),
-                    p::OutgoingMessage::Peer(
-                        if from_consumer {
-                            p::PeerMessage::Consumer(info)
-                        } else {
-                            p::PeerMessage::Producer(info)
-                        }
-                    )
-                ));
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "cannot forward ICE from {} to {} as they are not in a session",
-                    peer_id,
-                    other_peer_id
-                ))
-            }
-        } else if let Some(producer) = self.consumers.get(peer_id) {
-            if &Some(other_peer_id.to_string()) == producer {
-                let info = p::PeerMessageInfo {
-                        peer_id: peer_id.to_string(),
-                        peer_message: p::PeerMessageInner::Ice {
-                            candidate,
-                            sdp_m_line_index,
-                        },
-                    };
-                self.items.push_back((
-                    other_peer_id.to_string(),
-                    p::OutgoingMessage::Peer(
-                        if from_consumer {
-                            p::PeerMessage::Consumer(info)
-                        } else {
-                            p::PeerMessage::Producer(info)
-                        }
-                    ),
-                ));
-
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "cannot forward ICE from {} to {} as they are not in a session",
-                    peer_id,
-                    other_peer_id
-                ))
-            }
+        if from_consumer {
+            self.handle_consumer_ice(candidate, sdp_m_line_index, peer_id, other_peer_id)
         } else {
-            Err(anyhow!(
-                "cannot forward ICE from {} to {} as they are not in a session",
-                peer_id,
-                other_peer_id,
-            ))
+            self.handle_producer_ice(candidate, sdp_m_line_index, peer_id, other_peer_id)
         }
     }
-
     /// Handle SDP offered by one peer to another peer
     #[instrument(level = "debug", skip(self))]
     fn handle_sdp_offer(
@@ -386,8 +417,8 @@ impl Handler {
         consumer_id: &str,
         producer_id: &str,
     ) -> Result<(), Error> {
-        if let Some(producer) = self.consumers.get(consumer_id) {
-            if &Some(producer_id.to_string()) == producer {
+        if let Some(producers) = self.consumers.get(consumer_id) {
+            if producers.contains(producer_id) {
                 let info = p::PeerMessageInfo {
                         peer_id: consumer_id.to_string(),
                         peer_message: p::PeerMessageInner::Sdp(p::SdpMessage::Answer { sdp }),
@@ -459,7 +490,7 @@ impl Handler {
         if self.consumers.contains_key(peer_id) {
             Err(anyhow!("{} is already registered as a consumer", peer_id))
         } else {
-            self.consumers.insert(peer_id.to_string(), None);
+            self.consumers.insert(peer_id.to_string(), Default::default());
 
             self.items.push_back((
                 peer_id.to_string(),
@@ -509,12 +540,14 @@ impl Handler {
             ));
         }
 
-        if let Some(producer_id) = self.consumers.get(consumer_id).unwrap() {
-            return Err(anyhow!(
-                "Consumer with id {} is already in a session with producer {}",
-                consumer_id,
-                producer_id,
-            ));
+        if let Some(producers) = self.consumers.get(consumer_id) {
+            if producers.contains(producer_id) {
+                return Err(anyhow!(
+                    "Consumer with id {} is already in a session with producer {}",
+                    consumer_id,
+                    producer_id,
+                ));
+            }
         }
 
         if !self.producers.contains_key(producer_id) {
@@ -525,7 +558,9 @@ impl Handler {
         }
 
         self.consumers
-            .insert(consumer_id.to_string(), Some(producer_id.to_string()));
+            .get_mut(consumer_id)
+            .unwrap()
+            .insert(producer_id.to_string());
         self.producers
             .get_mut(producer_id)
             .unwrap()
