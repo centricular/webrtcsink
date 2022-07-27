@@ -113,6 +113,7 @@ function Session(our_id, peer_id, closed_callback) {
             this.setStatus("Sending SDP answer");
             var sdp = {
                 'type': 'peer',
+                'senderType': 'consumer',
                 'peerId': this.peer_id,
                 'sdp': this.peer_connection.localDescription.toJSON()
             };
@@ -315,6 +316,7 @@ function Session(our_id, peer_id, closed_callback) {
             }
             this.ws_conn.send(JSON.stringify({
                 "type": "peer",
+                'senderType': 'consumer',
                 "peerId": this.peer_id,
                 "ice": event.candidate.toJSON()
             }));
