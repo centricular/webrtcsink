@@ -1148,23 +1148,34 @@ impl State {
 
                         let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
 
-                        let pipeline_clone = self.pipeline.downgrade();
-    
-                        webrtcbin.call_async(move |webrtcbin| {
-                            let pipeline = pipeline_clone.upgrade().unwrap();
-    
-                            if webrtcbin.set_state(gst::State::Null).is_err() {
-                                gst::error!(
-                                    CAT,
-                                    obj: webrtcbin,
-                                    "Failed to set webrtcbin to Playing"
-                                );
-                            }
+                        if webrtcbin.set_state(gst::State::Null).is_err() {
+                            gst::error!(
+                                CAT,
+                                obj: &webrtcbin,
+                                "Failed to set webrtcbin to Playing"
+                            );
+                        }
 
-                            pipeline.remove(webrtcbin).unwrap(); 
-                            gst::info!(CAT,"PUDIM Removed webrtcbin from pipeline");        
+                        self.pipeline.remove(&webrtcbin).unwrap(); 
+                        gst::info!(CAT,"PUDIM Removed webrtcbin from pipeline");    
 
-                        });
+                        //let pipeline_clone = self.pipeline.downgrade();
+    
+                        // webrtcbin.call_async(move |webrtcbin| {
+                        //     let pipeline = pipeline_clone.upgrade().unwrap();
+    
+                        //     if webrtcbin.set_state(gst::State::Null).is_err() {
+                        //         gst::error!(
+                        //             CAT,
+                        //             obj: webrtcbin,
+                        //             "Failed to set webrtcbin to Playing"
+                        //         );
+                        //     }
+
+                        //     pipeline.remove(webrtcbin).unwrap(); 
+                        //     gst::info!(CAT,"PUDIM Removed webrtcbin from pipeline");        
+
+                        // });
                     } 
                 }
                 else {
