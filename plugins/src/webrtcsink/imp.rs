@@ -469,7 +469,7 @@ fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
                 enc.set_property_from_str("rate-control", "cbr");
             }
             "nvv4l2h264enc" => {
-                enc.set_property("bitrate", 4096000u32 / 1000);
+                enc.set_property("bitrate", 4096000u32);
                 enc.set_property("insert-sps-pps", true);
                 enc.set_property_from_str("preset-level", "UltraFastPreset");
                 enc.set_property("maxperf-enable", true);
@@ -480,7 +480,7 @@ fn configure_encoder(enc: &gst::Element, start_bitrate: u32) {
                 enc.set_property_from_str("control-rate", "variable_bitrate");
             }
             "nvv4l2vp8enc" => {
-                enc.set_property("bitrate", 4096000u32 / 1000);
+                enc.set_property("bitrate", 4096000u32);
                 enc.set_property_from_str("preset-level", "UltraFastPreset");
                 enc.set_property("maxperf-enable", true);
                 enc.set_property("idrinterval", 256u32);
@@ -509,6 +509,8 @@ fn setup_encoding(
 
     let conv_filter = make_element("capsfilter", None)?;
 
+    let queue = make_element("queue", None)?;
+
     let enc = codec
         .encoder
         .create(None)
@@ -526,9 +528,9 @@ fn setup_encoding(
     }
 
     pipeline
-        .add_many(&[&conv, &conv_filter, &enc, &parse_filter, &pay])
+        .add_many(&[&conv, &conv_filter, &queue, &enc, &parse_filter, &pay])
         .unwrap();
-    gst::Element::link_many(&[src, &conv, &conv_filter, &enc])
+    gst::Element::link_many(&[src, &conv, &conv_filter, &queue, &enc])
         .with_context(|| "Linking encoding elements")?;
 
     let codec_name = codec.caps.structure(0).unwrap().name();
