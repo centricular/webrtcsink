@@ -1108,21 +1108,16 @@ impl State {
         let mut it = consumer.webrtc_pads.iter().peekable();
 
         while let Some((_, webrtc_pad)) = it.next()  {
-            gst::info!(CAT,"PUDIM Webrtc pad: {}", webrtc_pad.pad.name());
             
             if let Some(queue_src_pad) = webrtc_pad.pad.peer(){
                 
                 let queue = queue_src_pad.parent_element().unwrap();
-
                 let queue_sink_pad = queue.static_pad("sink").unwrap();
 
                 if let Some(tee_src_pad) = queue_sink_pad.peer(){
                 
                     let tee = tee_src_pad.parent_element().unwrap();
-                    gst::info!(CAT, "PUDIM tee name {}",tee_src_pad.name());
-
                     let tee_sink_pad = tee.static_pad("sink").unwrap();
-
                     let tee_block = tee_sink_pad
                         .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
                             gst::PadProbeReturn::Ok
@@ -1130,9 +1125,7 @@ impl State {
                         .unwrap();
                     
                     queue_src_pad.unlink(&webrtc_pad.pad).unwrap();
-
                     tee_src_pad.unlink(&queue_sink_pad).unwrap();
-                    
                     tee.release_request_pad(&tee_src_pad);
 
                     tee_sink_pad.remove_probe(tee_block);
@@ -1140,11 +1133,7 @@ impl State {
                     queue.set_state(gst::State::Null).unwrap();
                     self.pipeline.remove(&queue).unwrap();
 
-                    let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
-                    gst::info!(CAT, "PUDIM Webrtcbin name: {}", webrtcbin.name());
-
                     if it.peek().is_none() {
-                        gst::info!(CAT,"PUDIM Last one: {}", webrtc_pad.pad.name());
 
                         let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
 
@@ -1152,30 +1141,11 @@ impl State {
                             gst::error!(
                                 CAT,
                                 obj: &webrtcbin,
-                                "Failed to set webrtcbin to Playing"
+                                "Failed to set webrtcbin to Null"
                             );
                         }
 
                         self.pipeline.remove(&webrtcbin).unwrap(); 
-                        gst::info!(CAT,"PUDIM Removed webrtcbin from pipeline");    
-
-                        //let pipeline_clone = self.pipeline.downgrade();
-    
-                        // webrtcbin.call_async(move |webrtcbin| {
-                        //     let pipeline = pipeline_clone.upgrade().unwrap();
-    
-                        //     if webrtcbin.set_state(gst::State::Null).is_err() {
-                        //         gst::error!(
-                        //             CAT,
-                        //             obj: webrtcbin,
-                        //             "Failed to set webrtcbin to Playing"
-                        //         );
-                        //     }
-
-                        //     pipeline.remove(webrtcbin).unwrap(); 
-                        //     gst::info!(CAT,"PUDIM Removed webrtcbin from pipeline");        
-
-                        // });
                     } 
                 }
                 else {
@@ -1212,7 +1182,6 @@ impl State {
         signal: bool,
     ) -> Option<Consumer> {
         if let Some(mut consumer) = self.consumers.remove(peer_id) {
-            gst::info!(CAT, "VERDE finalize consumer in remove consumer state");
             self.finalize_consumer(element, &mut consumer, signal);
             Some(consumer)
         } else {
@@ -1225,7 +1194,6 @@ impl State {
             && element.current_state() >= gst::State::Paused
             && self.codec_discovery_done
         {
-            gst::info!(CAT, "Pudim Starting Signaller");
             if let Err(err) = self.signaller.start(element) {
                 gst::error!(CAT, obj: element, "error: {}", err);
                 gst::element_error!(
@@ -1237,8 +1205,6 @@ impl State {
                 gst::info!(CAT, "Started signaller");
                 self.signaller_state = SignallerState::Started;
             }
-        }else {
-            gst::info!(CAT, "Pudim NOT Starting Signaller");
         }
     }
 
@@ -1430,7 +1396,6 @@ impl InputStream {
 
         let producer = StreamProducer::from(&appsink);
         producer.forward();
-        gst::info!(CAT, "Pudim Producer created for stream {}", self.sink_pad.name());
         self.producer = Some(producer);
 
         Ok(())
@@ -1517,8 +1482,6 @@ impl InputStream {
             &[&self.sink_pad.name(), &enc],
         );
 
-        gst::info!(CAT, "PUDIM Codec name {}", codec.caps.structure(0).unwrap().name());
-
         let caps = self.create_caps_for_pay_filter(codec.caps.structure(0).unwrap().name());
         pay_filter.set_property("caps", caps);
 
@@ -1589,14 +1552,14 @@ impl WebRTCSink {
         let mut streams = state.streams.clone();
         streams.iter_mut().for_each(|(_, stream )| {         
                 if let Err(err) = stream.create_pipeline(&element, &state.pipeline, &state.codecs, &mut state.links) {
-                    gst::error!(CAT, obj: element, "error: {}", err);
+                    gst::error!(CAT, obj: element, "error creating main pipeline for producer: {}", err);
                     gst::element_error!(
                         element,
                         gst::StreamError::Failed,
-                        ["Failed to start pipeline {}", err]
+                        ["Failed to start main pipeline for producer: {}", err]
                     );
                 } else {
-                    gst::info!(CAT, "Pipeline Created")
+                    gst::info!(CAT, "Main pipeline for producer created")
                 }
             }
         );
@@ -1629,8 +1592,6 @@ impl WebRTCSink {
                         gst::MessageView::StateChanged(state_changed) => {
                             if let Some(pipeline) = pipeline_clone.upgrade() {
                                 if Some(pipeline.clone().upcast()) == state_changed.src() {
-                                    gst::info!(CAT,
-                                        "Pudim Dot of change of state in producer pipeline");
                                     pipeline.debug_to_dot_file_with_ts(
                                         gst::DebugGraphDetails::all(),
                                         format!(
@@ -1751,7 +1712,6 @@ impl WebRTCSink {
         let consumer_ids: Vec<_> = state.consumers.keys().map(|k| k.to_owned()).collect();
 
         for id in consumer_ids {
-            gst::info!(CAT, "VERDE remove consumer in unprepare webrtcsink");
             state.remove_consumer(element, &id, true);
         }
 
@@ -1822,7 +1782,6 @@ impl WebRTCSink {
                     peer_id,
                     err
                 );
-                gst::info!(CAT, "VERDE remove consumer in offer created");
 
                 state.remove_consumer(element, peer_id, true);
             }
@@ -1852,7 +1811,6 @@ impl WebRTCSink {
                                 "Promise returned without a reply for {}",
                                 peer_id
                             );
-                            gst::info!(CAT, "VERDE remove consumer in negotiate");
 
                             let _ = this.remove_consumer(&element, &peer_id, true);
                             return;
@@ -1865,7 +1823,6 @@ impl WebRTCSink {
                                 peer_id,
                                 err
                             );
-                            gst::info!(CAT, "VERDE remove consumer in negotiate");
                             let _ = this.remove_consumer(&element, &peer_id, true);
                             return;
                         }
@@ -1883,7 +1840,6 @@ impl WebRTCSink {
                             peer_id,
                             reply
                         );
-                        gst::info!(CAT, "VERDE remove consumer in negotiate");
                         let _ = this.remove_consumer(&element, &peer_id, true);
                     }
                 }
@@ -1921,7 +1877,6 @@ impl WebRTCSink {
                 peer_id,
                 err
             );
-            gst::info!(CAT, "VERDE remove consumer on ice candidate");
 
             state.remove_consumer(element, &peer_id, true);
         }
@@ -1994,7 +1949,6 @@ impl WebRTCSink {
                             "Connection state for consumer {} failed",
                             peer_id_clone
                         );
-                        gst::info!(CAT, "VERDE remove consumer in add consumer");
                         let _ = this.remove_consumer(&element, &peer_id_clone, true);
                     }
                     _ => {
@@ -2026,7 +1980,6 @@ impl WebRTCSink {
                             "Ice connection state for consumer {} failed",
                             peer_id_clone
                         );
-                        gst::info!(CAT, "VERDE remove consumer in add consumer");
                         let _ = this.remove_consumer(&element, &peer_id_clone, true);
                     }
                     _ => {
@@ -2174,14 +2127,10 @@ impl WebRTCSink {
         if !state.consumers.contains_key(peer_id) {
             return Err(WebRTCSinkError::NoConsumerWithId(peer_id.to_string()));
         }
-        gst::info!(CAT, "VERDE remove consumer in remove consumer webrtcsink");
 
         if let Some(consumer) = state.remove_consumer(element, peer_id, signal) {
             drop(state);
-            gst::info!(CAT, "VERDE going to emit signal");
             element.emit_by_name::<()>("consumer-removed", &[&peer_id, &consumer.webrtcbin]);
-            gst::info!(CAT, "VERDE going to emitted signal");
-
         }
 
         Ok(())
@@ -2295,7 +2244,6 @@ impl WebRTCSink {
             });
 
             if remove {
-                gst::info!(CAT, "VERDE finalize consumer in on remote description set");
                 state.finalize_consumer(element, &mut consumer, true);
             } else {
                 state.consumers.insert(consumer.peer_id.clone(), consumer);
@@ -2358,7 +2306,6 @@ impl WebRTCSink {
                             media_idx,
                             media_str
                         );
-                        gst::info!(CAT, "VERDE remove consumer in handle sdp");
                         state.remove_consumer(element, peer_id, true);
 
                         return Err(WebRTCSinkError::ConsumerRefusedMedia {
@@ -2617,15 +2564,12 @@ impl WebRTCSink {
                         .for_each(|(_, mut stream)| {
                             if stream.sink_pad.upcast_ref::<gst::Pad>() == pad {
                                 stream.in_caps = Some(e.caps().to_owned());
-                                gst::info!(CAT, "PUDIM Stream {} has caps {}", stream.sink_pad.name(), e.caps());
                             } else if stream.in_caps.is_none() {
                                 all_pads_have_caps = false;
-                                gst::info!(CAT, "PUDIM Stream {} does not have caps", stream.sink_pad.name());
                             }
                         });
 
                     if all_pads_have_caps {
-                        gst::info!(CAT, "PUDIM Streams all have caps");
                         let element_clone = element.downgrade();
                         task::spawn(async move {
                             if let Some(element) = element_clone.upgrade() {
@@ -2655,7 +2599,6 @@ impl WebRTCSink {
                                     }
                                     Ok(Ok(_)) => {
                                         let mut state = this.state.lock().unwrap();
-                                        gst::info!(CAT, "PUDIM Codec Discovery Done, will start signaller");
                                         state.codec_discovery_done = true;
                                         this.prepare_pipeline(&element, &mut state);
                                         state.maybe_start_signaller(&element);
@@ -3161,8 +3104,6 @@ impl ElementImpl for WebRTCSink {
         sink_pad.use_fixed_caps();
         element.add_pad(&sink_pad).unwrap();
 
-        gst::info!(CAT, "PUDIM New sink pad for webrtcsink with name: {}", name);
-
         let srrc = state.generate_ssrc();
 
         state.streams.insert(
@@ -3188,7 +3129,6 @@ impl ElementImpl for WebRTCSink {
         transition: gst::StateChange,
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
         if let gst::StateChange::ReadyToPaused = transition {
-            gst::info!(CAT, "PUDIM Going to Prepare Element");
 
             if let Err(err) = self.prepare(element) {
                 gst::element_error!(
@@ -3204,7 +3144,6 @@ impl ElementImpl for WebRTCSink {
 
         match transition {
             gst::StateChange::PausedToReady => {
-                gst::info!(CAT, "PUDIM Going to Unprepare Element");
 
                 if let Err(err) = self.unprepare(element) {
                     gst::element_error!(
@@ -3219,7 +3158,6 @@ impl ElementImpl for WebRTCSink {
                 ret = Ok(gst::StateChangeSuccess::NoPreroll);
             }
             gst::StateChange::PausedToPlaying => {
-                gst::info!(CAT, "PUDIM From State Going to Start Signaller");
                 let mut state = self.state.lock().unwrap();
                 state.maybe_start_signaller(element);
             }
