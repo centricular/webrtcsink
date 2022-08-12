@@ -3128,6 +3128,7 @@ impl ElementImpl for WebRTCSink {
         element: &Self::Type,
         transition: gst::StateChange,
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
+        gst::info!(CAT, "Using optimized webrtcsink!");
         if let gst::StateChange::ReadyToPaused = transition {
 
             if let Err(err) = self.prepare(element) {
