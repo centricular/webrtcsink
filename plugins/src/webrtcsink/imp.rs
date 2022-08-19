@@ -2380,7 +2380,7 @@ impl ObjectImpl for WebRTCSink {
                 settings.cc_info.max_bitrate = (value.get::<u32>().expect("type checked upstream")
                     as f32
                     * if settings.do_fec {
-                        settings.cc_info.max_bitrate as f32 * 1.5
+                        1.5
                     } else {
                         1.
                     }) as u32;
