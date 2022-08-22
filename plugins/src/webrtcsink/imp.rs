@@ -918,6 +918,42 @@ impl Consumer {
         }));
         filtered_s.set("ssrc", webrtc_pad.ssrc);
 
+        match codec.encoder.name().as_str() {
+            // FIXME: Remove when vp9enc is fixed
+            // https://gitlab.freedesktop.org/gstreamer/gstreamer/-/issues/1403
+            // vp9enc doesn't set upstream caps based on downstream profile-id
+            "vp9enc" => {
+                let profile = {
+                    if let Some(id) = filtered_s.get_optional::<String>("profile-id").unwrap() {
+                        id.parse::<u32>().unwrap()
+                    } else {
+                        // Missing profile-id implies profile 0
+                        0
+                    }
+                };
+
+                // https://www.webmproject.org/vp9/profiles/
+                // profile >= 0
+                let mut formats = vec![&"YV12", &"I420"];
+                if profile >= 1 {
+                    formats.push(&"Y444")
+                }
+                if profile >= 2 {
+                    formats.push(&"I420_10LE")
+                }
+                if profile == 3 {
+                    formats.push(&"I422_10LE")
+                }
+
+                let mut raw_caps = raw_filter.property::<gst::Caps>("caps");
+                raw_caps
+                    .make_mut()
+                    .set_simple(&[("format", &gst::List::new(&formats))]);
+                raw_filter.set_property("caps", raw_caps);
+            }
+            _ => (),
+        }
+
         let caps = gst::Caps::builder_full().structure(filtered_s).build();
 
         pay_filter.set_property("caps", caps);
