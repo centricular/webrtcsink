@@ -1330,10 +1330,6 @@ impl Consumer {
             self.peer_id
         );
 
-        let queue = make_element("queue", None)?;
-        pipeline.add(&queue).unwrap();
-        queue.sync_state_with_parent().unwrap();
-        let queue_src = queue.static_pad("src").unwrap();
 
         let pad_template = stream.tee.as_ref().unwrap().pad_template("src_%u").unwrap();
         let tee_pad = stream.tee.as_ref().unwrap().request_pad(&pad_template, None, None).unwrap();
@@ -1343,12 +1339,17 @@ impl Consumer {
                 gst::PadProbeReturn::Ok
             })
             .unwrap();
+
+        let queue = make_element("queue", None)?;
+        pipeline.add(&queue).unwrap();
+        let queue_src = queue.static_pad("src").unwrap();
         
         stream.tee.as_ref().unwrap().link(&queue)?;
 
         queue_src.link(&webrtc_pad.pad)
             .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
         
+        queue.sync_state_with_parent().unwrap();
 
         if self.webrtcbin.sync_state_with_parent().is_err() {
             gst::error!(
@@ -1378,7 +1379,8 @@ impl InputStream {
         let appsink = make_element("appsink", None)?
             .downcast::<gst_app::AppSink>()
             .unwrap();
-
+        appsink.set_property("drop", true);
+        appsink.set_property("emit-signals", true);
         element.add(&clocksync).unwrap();
         element.add(&appsink).unwrap();
 
@@ -1596,7 +1598,7 @@ impl WebRTCSink {
                                         gst::DebugGraphDetails::all(),
                                         format!(
                                             "webrtcsink-producer-peer-{:?}-{:?}-to-{:?}",
-                                            this.settings.lock().unwrap().display_name,
+                                            this.settings.lock().unwrap().display_name.clone().unwrap().to_string(),
                                             state_changed.old(),
                                             state_changed.current()
                                         ),
@@ -1904,7 +1906,7 @@ impl WebRTCSink {
             }
         })?;
 
-        webrtcbin.set_property_from_str("bundle-policy", "max-bundle");
+        webrtcbin.set_property_from_str("bundle-policy", "max-compat");
 
         if let Some(stun_server) = settings.stun_server.as_ref() {
             webrtcbin.set_property("stun-server", stun_server);
@@ -2079,13 +2081,6 @@ impl WebRTCSink {
             .for_each(|(_, stream)| consumer.request_webrtcbin_pad(element, &settings, stream));
 
 
-        webrtcbin.set_state(gst::State::Ready).map_err(|err| {
-            WebRTCSinkError::ConsumerPipelineError {
-                peer_id: peer_id.to_string(),
-                details: err.to_string(),
-            }
-        })?;
-
         if settings.enable_data_channel_navigation {
             state.navigation_handler = Some(NavigationEventHandler::new(element, &webrtcbin));
         }
@@ -2093,6 +2088,8 @@ impl WebRTCSink {
         state.consumers.insert(peer_id.to_string(), consumer);
 
         drop(state);
+
+        self.on_remote_description_set(&element, peer_id.to_string());
 
         // This is intentionally emitted with the pipeline in the Ready state,
         // so that application code can create data channels at the correct
@@ -2110,8 +2107,6 @@ impl WebRTCSink {
         // webrtcbin is in the Ready state, and all its transceivers have codec_preferences.
         self.negotiate(element, peer_id);
 
-        webrtcbin.sync_state_with_parent().unwrap();
-        
         Ok(())
     }
 
@@ -2338,16 +2333,15 @@ impl WebRTCSink {
                 // }
             }
 
-            let element = element.downgrade();
-            let peer_id = peer_id.to_string();
+            //let element = element.downgrade();
+            //let peer_id = peer_id.to_string();
 
             let promise = gst::Promise::with_change_func(move |reply| {
                 gst::debug!(CAT, "received reply {:?}", reply);
-                if let Some(element) = element.upgrade() {
-                    let this = Self::from_instance(&element);
-
-                    this.on_remote_description_set(&element, peer_id);
-                }
+                // if let Some(element) = element.upgrade() {
+                //     let this = Self::from_instance(&element);
+                //     this.on_remote_description_set(&element, peer_id);
+                // }
             });
 
             consumer
@@ -3128,7 +3122,6 @@ impl ElementImpl for WebRTCSink {
         element: &Self::Type,
         transition: gst::StateChange,
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
-        gst::info!(CAT, "Using optimized webrtcsink!");
         if let gst::StateChange::ReadyToPaused = transition {
 
             if let Err(err) = self.prepare(element) {
