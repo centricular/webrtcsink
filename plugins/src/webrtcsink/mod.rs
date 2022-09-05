@@ -26,6 +26,8 @@ pub enum WebRTCSinkError {
     DuplicateConsumerId(String),
     #[error("error setting up consumer pipeline")]
     ConsumerPipelineError { peer_id: String, details: String },
+    #[error("error setting up producer pipeline")]
+    ProducerPipelineError { details: String },
 }
 
 pub trait Signallable: Sync + Send + 'static {

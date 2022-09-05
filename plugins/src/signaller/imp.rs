@@ -79,13 +79,38 @@ impl Signaller {
             mpsc::channel::<p::IncomingMessage>(1000);
         let element_clone = element.downgrade();
         let send_task_handle = task::spawn(async move {
-            while let Some(msg) = websocket_receiver.next().await {
-                if let Some(element) = element_clone.upgrade() {
-                    gst::trace!(CAT, obj: &element, "Sending websocket message {:?}", msg);
+            // while let Some(msg) = websocket_receiver.next().await {
+            //     if let Some(element) = element_clone.upgrade() {
+            //         gst::trace!(CAT, obj: &element, "Sending websocket message {:?}", msg);
+            //     }
+            //     ws_sink
+            //         .send(WsMessage::Text(serde_json::to_string(&msg).unwrap()))
+            //         .await?;
+            // }
+
+            loop {
+                match async_std::future::timeout(
+                    std::time::Duration::from_secs(30),
+                    websocket_receiver.next(),
+                )
+                .await
+                {
+                    Ok(Some(msg)) => {
+                        if let Some(element) = element_clone.upgrade() {
+                            gst::trace!(CAT, obj: &element, "Sending websocket message {:?}", msg);
+                        }
+                        ws_sink.send(WsMessage::Text(serde_json::to_string(&msg).unwrap())).await?;
+                    }
+                    Ok(None) => {
+                        break;
+                    }
+                    Err(_) => {
+                        if let Some(element) = element_clone.upgrade() {
+                            gst::trace!(CAT, obj: &element, "timeout, sending ping");
+                        }
+                        ws_sink.send(WsMessage::Ping(vec![])).await?;
+                    }
                 }
-                ws_sink
-                    .send(WsMessage::Text(serde_json::to_string(&msg).unwrap()))
-                    .await?;
             }
 
             if let Some(element) = element_clone.upgrade() {
