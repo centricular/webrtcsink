@@ -1105,6 +1105,8 @@ impl State {
         consumer: &mut Consumer,
         signal: bool,
     ) {
+        gst::info!(CAT, "Removing: {}", consumer.webrtcbin.name());
+
         let mut it = consumer.webrtc_pads.iter().peekable();
 
         while let Some((_, webrtc_pad)) = it.next()  {
@@ -1114,39 +1116,44 @@ impl State {
                 let queue = queue_src_pad.parent_element().unwrap();
                 let queue_sink_pad = queue.static_pad("sink").unwrap();
 
-                if let Some(tee_src_pad) = queue_sink_pad.peer(){
-                
+                if let Some(tee_src_pad) = queue_sink_pad.peer(){                
                     let tee = tee_src_pad.parent_element().unwrap();
-                    let tee_sink_pad = tee.static_pad("sink").unwrap();
-                    let tee_block = tee_sink_pad
+                    let tee_block = tee_src_pad
                         .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
                             gst::PadProbeReturn::Ok
                         })
                         .unwrap();
                     
-                    queue_src_pad.unlink(&webrtc_pad.pad).unwrap();
-                    tee_src_pad.unlink(&queue_sink_pad).unwrap();
+                    if queue_src_pad.unlink(&webrtc_pad.pad).is_err() {
+                        gst::info!(
+                            CAT,
+                            "ERROR, Failed to unlink queue src to webrtc pad"
+                        );
+                    }
+                    if tee_src_pad.unlink(&queue_sink_pad).is_err() {
+                        gst::info!(
+                            CAT,
+                            "ERROR, Failed to unlink tee src to queue sink"
+                        );                    
+                    }
+                    tee_src_pad.remove_probe(tee_block);
                     tee.release_request_pad(&tee_src_pad);
+                    consumer.webrtcbin.release_request_pad(&webrtc_pad.pad);
 
-                    tee_sink_pad.remove_probe(tee_block);
+                    if queue.set_state(gst::State::Null).is_err() {
+                        gst::info!(
+                            CAT,
+                            "ERROR, Failed to set queue to Null"
+                        );
+                    }
 
-                    queue.set_state(gst::State::Null).unwrap();
-                    self.pipeline.remove(&queue).unwrap();
+                    if  self.pipeline.remove(&queue).is_err() {
+                        gst::info!(
+                            CAT,
+                            "ERROR, Failed to remove queue"
+                        );
+                    }
 
-                    if it.peek().is_none() {
-
-                        let webrtcbin = webrtc_pad.pad.parent_element().unwrap();
-
-                        if webrtcbin.set_state(gst::State::Null).is_err() {
-                            gst::error!(
-                                CAT,
-                                obj: &webrtcbin,
-                                "Failed to set webrtcbin to Null"
-                            );
-                        }
-
-                        self.pipeline.remove(&webrtcbin).unwrap(); 
-                    } 
                 }
                 else {
                     gst::debug!(
@@ -1165,9 +1172,28 @@ impl State {
                     "Webrtc pad {} is not linked to queue pad",
                     webrtc_pad.pad.name()
                 );
-            } 
+            }
 
         }
+
+        let test = self.pipeline.downgrade();
+        consumer.webrtcbin.call_async( move |webrtcbin| {
+            let pipeline = test.upgrade().unwrap();
+            
+            if webrtcbin.set_state(gst::State::Null).is_err() {
+                gst::info!(
+                    CAT,
+                    "Failed to set webrtcbin to Null"
+                );
+            }
+
+            if  pipeline.remove(webrtcbin).is_err() {
+                gst::info!(
+                    CAT,
+                    "ERROR, Failed to remove webrtcbin"
+                );
+            }
+        });
 
         if signal {
             self.signaller.consumer_removed(element, &consumer.peer_id);
@@ -1344,11 +1370,6 @@ impl Consumer {
         pipeline.add(&queue).unwrap();
         let queue_src = queue.static_pad("src").unwrap();
         
-        stream.tee.as_ref().unwrap().link(&queue)?;
-
-        queue_src.link(&webrtc_pad.pad)
-            .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
-        
         queue.sync_state_with_parent().unwrap();
 
         if self.webrtcbin.sync_state_with_parent().is_err() {
@@ -1359,6 +1380,11 @@ impl Consumer {
             );
         }
 
+        stream.tee.as_ref().unwrap().link(&queue)?;
+
+        queue_src.link(&webrtc_pad.pad)
+            .with_context(|| format!("Connecting input stream for {}", self.peer_id))?;
+        
         tee_pad.remove_probe(tee_block);
                
         Ok(())
@@ -1490,11 +1516,11 @@ impl InputStream {
         let appsrc = appsrc.downcast::<gst_app::AppSrc>().unwrap();
         gst_utils::StreamProducer::configure_consumer(&appsrc);
 
-        pipeline.set_state(gst::State::Ready).map_err(|err| {
-            WebRTCSinkError::ProducerPipelineError {
-                details: err.to_string(),
-            }
-        })?;
+        // pipeline.set_state(gst::State::Ready).map_err(|err| {
+        //     WebRTCSinkError::ProducerPipelineError {
+        //         details: err.to_string(),
+        //     }
+        // })?;
 
         let result = match self.producer.as_ref().unwrap().add_consumer(&appsrc) {
             Ok(link) => {
@@ -2336,17 +2362,17 @@ impl WebRTCSink {
             //let element = element.downgrade();
             //let peer_id = peer_id.to_string();
 
-            let promise = gst::Promise::with_change_func(move |reply| {
-                gst::debug!(CAT, "received reply {:?}", reply);
-                // if let Some(element) = element.upgrade() {
-                //     let this = Self::from_instance(&element);
-                //     this.on_remote_description_set(&element, peer_id);
-                // }
-            });
+            // let promise = gst::Promise::with_change_func(move |reply| {
+            //     gst::debug!(CAT, "received reply {:?}", reply);
+            //     // if let Some(element) = element.upgrade() {
+            //     //     let this = Self::from_instance(&element);
+            //     //     this.on_remote_description_set(&element, peer_id);
+            //     // }
+            // });
 
             consumer
                 .webrtcbin
-                .emit_by_name::<()>("set-remote-description", &[desc, &promise]);
+                .emit_by_name::<()>("set-remote-description", &[desc, &None::<gst::Promise>]);
 
             Ok(())
         } else {
