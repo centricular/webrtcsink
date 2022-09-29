@@ -86,8 +86,7 @@ impl Handler {
     }
 
     fn handle_peer_message(&mut self, peer_id: &str, peermsg: p::PeerMessage) -> Result<(), Error> {
-        let session_id = &peermsg.session_id;
-        let session = self
+        let session_id = &peermsg.session_id; let session = self
             .sessions
             .get(session_id)
             .context(format!("Session {} doesn't exist", session_id))?
@@ -115,16 +114,16 @@ impl Handler {
         Ok(())
     }
 
-    fn stop_producer(&mut self, peer_id: &str) {
+    fn stop_sessions(&mut self, peer_id: &str, role: p::PeerRole) {
         let sessions_to_end = self
             .sessions
             .iter()
-            .filter_map(|(session_id, session)| {
-                if session.producer == peer_id || session.consumer == peer_id {
+            .filter_map(|(session_id, session)| match role {
+                p::PeerRole::Producer | p::PeerRole::All if session.producer == peer_id => {
                     Some(session_id.clone())
-                } else {
-                    None
                 }
+                p::PeerRole::All if session.consumer == peer_id => Some(session_id.clone()),
+                _ => None,
             })
             .collect::<Vec<String>>();
 
@@ -144,7 +143,7 @@ impl Handler {
             _ => return,
         };
 
-        self.stop_producer(peer_id);
+        self.stop_sessions(peer_id, p::PeerRole::All);
 
         for (id, p) in self.peers.iter() {
             if !p.listening() {
@@ -215,7 +214,7 @@ impl Handler {
         }
 
         if old_status.producing() && !status.producing() {
-            self.stop_producer(peer_id);
+            self.stop_sessions(peer_id, p::PeerRole::Producer);
         }
 
         let mut status = status.clone();

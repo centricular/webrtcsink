@@ -45,6 +45,9 @@ pub enum PeerRole {
     /// Register as a listener
     #[serde(rename_all = "camelCase")]
     Listener,
+
+    #[serde(skip)]
+    All,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Default, Clone)]
