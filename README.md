@@ -1,3 +1,7 @@
+**IMPORTANT: this repository is now archived, as the code has been upstreamed to https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/tree/main/net/webrtc, all new development will occur there**
+
+Thanks to everyone who contributed / opened issues / participated to discussions, hoping to find you soon in the new location!
+
 # webrtcsink
 
 All-batteries included GStreamer WebRTC producer, that tries its best to do The Right Thing™.
